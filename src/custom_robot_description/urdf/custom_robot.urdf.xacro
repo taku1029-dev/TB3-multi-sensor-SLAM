@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot name="custom_robot" xmlns:xacro="http://ros.org/wiki/xacro">
+
+	<xacro:include filename="$(find custom_robot_description)/urdf/turtlebot3_burger.urdf.xacro"/>
+	<!-- 2. Change where import from -->
+	<!-- <xacro:include filename="$(find realsense2_description)/urdf/_d435.urdf.xacro"/> -->
+	<xacro:include filename="$(find custom_robot_description)/urdf/_d435.urdf.xacro"/>
+
+	<xacro:sensor_d435 parent="base_link" use_nominal_extrinsics="true">
+		<origin xyz="0.010 0.0 0.140" rpy="0 0 0"/>
+		<!-- 1. Separate from body -->
+		<!-- Seems fine, to be removed soon -->
+		<!-- <origin xyz="0.10 0.0 0.20" rpy="0 0 0"/> -->
+	</xacro:sensor_d435>
+
+	<!-- attach sensor to the camera -->
+	<gazebo reference="camera_depth_optical_frame">
+		<sensor name="d435_sensor" type="rgbd_camera">
+			<origin xyz="0 0 0" rpy="0 0 0"/>
+			<always_on>1</always_on>
+			<update_rate>10</update_rate>
+			<topic>camera/rgbd</topic>
+			<visualize>false</visualize>
+			<camera name="rgbd_camera">
+				<horizontal_fov>1.5917</horizontal_fov>
+				<image>
+					<width>1280</width>
+					<height>720</height>
+					<format>R8G8B8</format>
+				</image>
+				<clip>
+					<!-- Too near(0.01) -> affected by frame -->
+					<near>0.105</near>
+					<far>8.0</far>
+				</clip>
+			</camera>
+		</sensor>
+	</gazebo>
+
+	<gazebo reference="base_scan">
+		<sensor name="LDS-02" type="lidar">
+			<origin xyz="0 0 0" rpy="0 0 0"/>
+			<always_on>true</always_on>
+			<update_rate>10</update_rate>
+			<visualize>false</visualize>
+			<topic>lidar</topic>
+			<lidar>
+				<scan>
+					<horizontal>
+						<sample>360</sample>
+						<resolution>1</resolution>
+						<min_angle>0.0</min_angle>
+						<max_angle>6.28319</max_angle>
+					</horizontal>
+					<vertical>
+						<sample>1</sample>
+						<resolution>1</resolution>
+						<min_angle>0.0</min_angle>
+						<max_angle>0.0</max_angle>
+					</vertical>
+					<range>
+						<min>0.16</min>
+						<max>8.0</max>
+						<resolution>0.015</resolution>
+					</range>
+				</scan>
+			</lidar>
+		</sensor>
+	</gazebo>
+
+	<gazebo name="imu-sensor" type="imu">
+		<origin xyz="0 0 0" rpy="0 0 0"/>
+		<always_on>true</always_on>
+		<update_rate>1</update_rate>
+		<visualize>false</visualize>
+		<topic>imu</topic>
+		<imu></imu>
+	</gazebo>
+
+	<gazebo reference="wheel_left_link">
+		<mu1>1.0</mu1>
+		<mu2>1.0</mu2>
+		<kp>1000000.0</kp>
+		<kd>100.0</kd>
+		<minDepth>0.001</minDepth>
+		<material>Gazebo/DarkGrey</material>
+	</gazebo>
+
+	<gazebo reference="wheel_right_link">
+		<mu1>1.0</mu1>
+		<mu2>1.0</mu2>
+		<kp>1000000.0</kp>
+		<kd>100.0</kd>
+		<minDepth>0.001</minDepth>
+		<material>Gazebo/DarkGrey</material>
+	</gazebo>
+
+	<gazebo reference="caster_back_link">
+		<mu1>0.0</mu1>
+		<mu2>0.0</mu2>
+		<kp>1000000.0</kp>
+		<kd>100.0</kd>
+		<minDepth>0.001</minDepth>
+		<material>Gazebo/FlatBlack</material>
+	</gazebo>
+
+	<gazebo reference="wheel_left_joint">
+		<implicitSpringDamper>true</implicitSpringDamper>
+		<provideFeedback>true</provideFeedback>
+	</gazebo>
+
+	<gazebo reference="wheel_right_joint">
+		<implicitSpringDamper>true</implicitSpringDamper>
+		<provideFeedback>true</provideFeedback>
+	</gazebo>
+
+	<gazebo>
+		<!-- Environmental Setup -->
+		<plugin filename="gz-sim-diff-drive-system" name="gz::sim::systems::DiffDrive">
+			<left_joint>wheel_left_joint</left_joint>
+			<right_joint>wheel_right_joint</right_joint>
+			<wheel_separation>0.160</wheel_separation>
+			<wheel_radius>0.033</wheel_radius>
+			<odom_publish_frequency>1</odom_publish_frequency>
+			<topic>cmd_vel</topic>
+		</plugin>
+
+		<plugin filename="gz-sim-joint-state-publisher-system" name="gz::sim::systems::JointStatePublisher">
+			<topic>model/custom_robot/joint_state</topic>
+			<joint_name>wheel_left_joint</joint_name>
+			<joint_name>wheel_right_joint</joint_name>
+		</plugin>
+
+		<!-- move forward -->
+		<plugin filename="gz-sim-triggered-publisher-system" name="gz::sim::systems::TriggeredPublisher">
+			<input type="gz.msgs.Int32" topic="/keyboard/keypress">
+				<match field="data">87</match>
+			</input>
+			<output type="gz.msgs.Twist" topic="/cmd_vel">
+				linear: {x: 0.5}, angular: {z: 0.0}
+			</output>
+		</plugin>
+
+		<!-- move back -->
+		<plugin filename="gz-sim-triggered-publisher-system" name="gz::sim::systems::TriggeredPublisher">
+			<input type="gz.msgs.Int32" topic="/keyboard/keypress">
+				<match field="data">83</match>
+			</input>
+			<output type="gz.msgs.Twist" topic="/cmd_vel">
+				linear: {x: -0.5}, angular: {z: 0.0}
+			</output>
+		</plugin>
+		<!-- move left -->
+		<plugin filename="gz-sim-triggered-publisher-system" name="gz::sim::systems::TriggeredPublisher">
+			<input type="gz.msgs.Int32" topic="/keyboard/keypress">
+				<match field="data">65</match>
+			</input>
+			<output type="gz.msgs.Twist" topic="/cmd_vel">
+				linear: {x: 0.0}, angular: {z: 0.5}
+			</output>
+		</plugin>
+
+		<!-- move right -->
+		<plugin filename="gz-sim-triggered-publisher-system" name="gz::sim::systems::TriggeredPublisher">
+			<input type="gz.msgs.Int32" topic="/keyboard/keypress">
+				<match field="data">68</match>
+			</input>
+			<output type="gz.msgs.Twist" topic="/cmd_vel">
+				linear: {x: 0.0}, angular: {z: -0.5}
+			</output>
+		</plugin>
+	</gazebo>
+</robot>
