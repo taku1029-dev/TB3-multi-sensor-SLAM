@@ -38,43 +38,53 @@
 	</gazebo>
 
 	<gazebo reference="base_scan">
-		<sensor name="LDS-02" type="lidar">
+		<sensor name="LDS-02" type="gpu_lidar">
 			<origin xyz="0 0 0" rpy="0 0 0"/>
 			<always_on>true</always_on>
 			<update_rate>10</update_rate>
 			<visualize>false</visualize>
 			<topic>lidar</topic>
+			<!-- Pin frame_id to "base_scan" (the URDF link) so slam_toolbox can
+			     transform scans into base_footprint via robot_state_publisher's TF. -->
+			<gz_frame_id>base_scan</gz_frame_id>
 			<lidar>
 				<scan>
 					<horizontal>
-						<sample>360</sample>
+						<samples>360</samples>
 						<resolution>1</resolution>
 						<min_angle>0.0</min_angle>
 						<max_angle>6.28319</max_angle>
 					</horizontal>
 					<vertical>
-						<sample>1</sample>
+						<samples>1</samples>
 						<resolution>1</resolution>
 						<min_angle>0.0</min_angle>
 						<max_angle>0.0</max_angle>
 					</vertical>
-					<range>
-						<min>0.16</min>
-						<max>8.0</max>
-						<resolution>0.015</resolution>
-					</range>
 				</scan>
+				<range>
+					<min>0.16</min>
+					<max>8.0</max>
+					<resolution>0.015</resolution>
+				</range>
 			</lidar>
 		</sensor>
 	</gazebo>
 
-	<gazebo name="imu-sensor" type="imu">
-		<origin xyz="0 0 0" rpy="0 0 0"/>
-		<always_on>true</always_on>
-		<update_rate>1</update_rate>
-		<visualize>false</visualize>
-		<topic>imu</topic>
-		<imu></imu>
+	<!-- IMU sensor must be wrapped in <gazebo reference="LINK"><sensor>...</sensor></gazebo>
+	     (matches the lidar block above). The earlier <gazebo name=... type="imu"> form is
+	     not the schema gz-sim expects, so the sensor was never instantiated. -->
+	<gazebo reference="imu_link">
+		<sensor name="imu-sensor" type="imu">
+			<always_on>true</always_on>
+			<update_rate>100</update_rate>
+			<visualize>false</visualize>
+			<topic>imu</topic>
+			<!-- gz-sim defaults to "<model>/<link>/<sensor>" for header.frame_id;
+			     pin to plain "imu_link" so it matches the URDF link name. -->
+			<gz_frame_id>imu_link</gz_frame_id>
+			<imu/>
+		</sensor>
 	</gazebo>
 
 	<gazebo reference="wheel_left_link">
@@ -121,8 +131,13 @@
 			<right_joint>wheel_right_joint</right_joint>
 			<wheel_separation>0.160</wheel_separation>
 			<wheel_radius>0.033</wheel_radius>
-			<odom_publish_frequency>1</odom_publish_frequency>
+			<odom_publish_frequency>30</odom_publish_frequency>
 			<topic>cmd_vel</topic>
+			<odom_topic>odom_wheel</odom_topic>
+			<!-- Override gz-sim's default model-prefixed frame names so EKF yaml's
+			     odom_frame:"odom" / base_link_frame:"base_footprint" match. -->
+			<frame_id>odom</frame_id>
+			<child_frame_id>base_footprint</child_frame_id>
 		</plugin>
 
 		<plugin filename="gz-sim-joint-state-publisher-system" name="gz::sim::systems::JointStatePublisher">
@@ -131,43 +146,20 @@
 			<joint_name>wheel_right_joint</joint_name>
 		</plugin>
 
-		<!-- move forward -->
-		<plugin filename="gz-sim-triggered-publisher-system" name="gz::sim::systems::TriggeredPublisher">
-			<input type="gz.msgs.Int32" topic="/keyboard/keypress">
-				<match field="data">87</match>
-			</input>
-			<output type="gz.msgs.Twist" topic="/cmd_vel">
-				linear: {x: 0.5}, angular: {z: 0.0}
-			</output>
+		<!-- Sim-only ground-truth pose for ADR-005 reward (`-|EKF_pose - GT_pose| * 10`).
+		     Defaults publish a Pose_V of every link/collision/visual; we want just the model
+		     pose so the bridge maps cleanly to a single geometry_msgs/PoseStamped on
+		     /model/custom_robot/pose (remapped to /ground_truth_pose in the launch). -->
+		<plugin filename="gz-sim-pose-publisher-system" name="gz::sim::systems::PosePublisher">
+			<publish_link_pose>false</publish_link_pose>
+			<publish_sensor_pose>false</publish_sensor_pose>
+			<publish_collision_pose>false</publish_collision_pose>
+			<publish_visual_pose>false</publish_visual_pose>
+			<publish_nested_model_pose>false</publish_nested_model_pose>
+			<publish_model_pose>true</publish_model_pose>
+			<use_pose_vector_msg>false</use_pose_vector_msg>
+			<update_frequency>30</update_frequency>
 		</plugin>
 
-		<!-- move back -->
-		<plugin filename="gz-sim-triggered-publisher-system" name="gz::sim::systems::TriggeredPublisher">
-			<input type="gz.msgs.Int32" topic="/keyboard/keypress">
-				<match field="data">83</match>
-			</input>
-			<output type="gz.msgs.Twist" topic="/cmd_vel">
-				linear: {x: -0.5}, angular: {z: 0.0}
-			</output>
-		</plugin>
-		<!-- move left -->
-		<plugin filename="gz-sim-triggered-publisher-system" name="gz::sim::systems::TriggeredPublisher">
-			<input type="gz.msgs.Int32" topic="/keyboard/keypress">
-				<match field="data">65</match>
-			</input>
-			<output type="gz.msgs.Twist" topic="/cmd_vel">
-				linear: {x: 0.0}, angular: {z: 0.5}
-			</output>
-		</plugin>
-
-		<!-- move right -->
-		<plugin filename="gz-sim-triggered-publisher-system" name="gz::sim::systems::TriggeredPublisher">
-			<input type="gz.msgs.Int32" topic="/keyboard/keypress">
-				<match field="data">68</match>
-			</input>
-			<output type="gz.msgs.Twist" topic="/cmd_vel">
-				linear: {x: 0.0}, angular: {z: -0.5}
-			</output>
-		</plugin>
 	</gazebo>
 </robot>

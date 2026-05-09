@@ -2,6 +2,19 @@
 script/
 install/
 log/
+
+## custom_robot_description
+src/custom_robot_description/meshes/
+src/custom_robot_description/config/
+src/custom_robot_description/include/
+src/custom_robot_description/pyrightconfig.json
+src/custom_robot_description/typings/
+src/custom_robot_description/urdf/
+!src/custom_robot_description/urdf/custom_robot.urdf
+
+## rl_navigation_pkg
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

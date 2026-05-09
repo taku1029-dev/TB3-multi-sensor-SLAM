@@ -1,0 +1,87 @@
+# slam_toolbox config for the SAC-tuned-EKF SLAM project.
+# Per adr/007-nav2-map-source-slam-toolbox.md:15, runs in `online_async` mode
+# (executable: async_slam_toolbox_node) and is phase-invariant across ADR-006.
+#
+# Frame contract (must match ekf_phase{1,2,3}.yaml):
+#   odom_frame  = odom            (EKF-owned post-cutover, ADR-002:52)
+#   base_frame  = base_footprint  (matches ekf base_link_frame)
+#   map_frame   = map             (slam_toolbox owns the map -> odom correction)
+#
+# slam_toolbox uses the EKF's filtered pose as motion prior via the odom -> base_footprint
+# TF that ekf_filter_node publishes (publish_tf: true, see adr/007:37).
+# It publishes /map (consumed by Nav2 global costmap) and the map -> odom TF.
+#
+# Notes:
+# - LDS-02 max range is 8 m (matches our urdf <range><max>8.0</max></range>).
+# - Resolution 0.05 m / 5 cm is the Nav2 default; matches typical TB3 Burger maps.
+# - minimum_travel_distance/heading are tuned down from defaults (0.5) since TB3 Burger
+#   moves in small increments; default would skip too many scans during slow motion.
+# - Map-clear-on-episode-reset (adr/010:62) is the env's responsibility; this config
+#   does not enable persistent serialization.
+
+slam_toolbox:
+  ros__parameters:
+    # ----- Plugin / solver -----
+    solver_plugin: solver_plugins::CeresSolver
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: SCHUR_JACOBI
+    ceres_trust_strategy: LEVENBERG_MARQUARDT
+    ceres_dogleg_type: TRADITIONAL_DOGLEG
+    ceres_loss_function: None
+
+    # ----- ROS / frames -----
+    odom_frame: odom
+    map_frame: map
+    base_frame: base_footprint
+    scan_topic: /lidar
+    use_map_saver: true
+    mode: mapping                       # online_async chooses the executable; mode here is map-build vs localize-only
+
+    # ----- General -----
+    debug_logging: false
+    throttle_scans: 1
+    transform_publish_period: 0.02      # ~50 Hz map->odom TF; 0 disables TF publish
+    map_update_interval: 5.0
+    resolution: 0.05
+    max_laser_range: 8.0                # LDS-02 spec
+    minimum_time_interval: 0.5
+    transform_timeout: 0.2
+    tf_buffer_duration: 30.0
+    stack_size_to_use: 40000000         # required uplift from default per slam_toolbox README
+    enable_interactive_mode: false      # training: skip the GUI hooks
+
+    # ----- Scan matching -----
+    use_scan_matching: true
+    use_scan_barycenter: true
+    minimum_travel_distance: 0.1        # TB3 Burger moves in small increments; default 0.5 skips too much
+    minimum_travel_heading: 0.1
+    scan_buffer_size: 10
+    scan_buffer_maximum_scan_distance: 10.0
+    link_match_minimum_response_fine: 0.1
+    link_scan_maximum_distance: 1.5
+    loop_search_maximum_distance: 3.0
+    do_loop_closing: true
+    loop_match_minimum_chain_size: 10
+    loop_match_maximum_variance_coarse: 3.0
+    loop_match_minimum_response_coarse: 0.35
+    loop_match_minimum_response_fine: 0.45
+
+    # ----- Correlation -----
+    correlation_search_space_dimension: 0.5
+    correlation_search_space_resolution: 0.01
+    correlation_search_space_smear_deviation: 0.1
+
+    # ----- Loop closure -----
+    loop_search_space_dimension: 8.0
+    loop_search_space_resolution: 0.05
+    loop_search_space_smear_deviation: 0.03
+
+    # ----- Scan matcher fine-tuning -----
+    distance_variance_penalty: 0.5
+    angle_variance_penalty: 1.0
+    fine_search_angle_offset: 0.00349
+    coarse_search_angle_offset: 0.349
+    coarse_angle_resolution: 0.0349
+    minimum_angle_penalty: 0.9
+    minimum_distance_penalty: 0.5
+    use_response_expansion: true

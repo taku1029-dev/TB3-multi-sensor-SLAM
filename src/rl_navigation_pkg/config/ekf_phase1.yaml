@@ -1,0 +1,136 @@
+# Phase 1 robot_localization ekf_filter_node config for the SAC-tuned-EKF SLAM project.
+# Per adr/006-ekf-input-source-phasing.md:21, Phase 1 fuses wheel odom (/odom_wheel) + IMU (/imu).
+#
+# Topic / frame contract:
+#   /odom_wheel  (DiffDrive, post-rename per ADR-002:52)  --\
+#                                                            > [ EKF input gate wrapper, ADR-011 ]
+#   /imu         (Gazebo IMU, bridged in spawn_robot.launch) -/
+#                          |
+#                          | wrapper applies σ_wheel / σ_imu (per ADR-009:25-27),
+#                          | republishes after the agent's set_parameters ack
+#                          v
+#   /ekf_in/odom_wheel, /ekf_in/imu  -->  ekf_filter_node  -->  /odom (filtered) + odom->base_footprint TF
+#
+# σ application path: the SAC agent's per-cycle protocol per ADR-011:24-29 is
+#   set_parameters(/ekf_filter_node, σ) -> ack -> wrapper release -> read /odom.
+# The "nominal diagonal" that σ multiplies (ADR-009:27) lives under ekf_input_gate: below.
+# This file is the single source for both nodes' configs; ROS 2 dispatches by node name.
+#
+# Per-phase variants live alongside this file (ekf_phase{2,3}.yaml) per ADR-006:38-42.
+# Tuning notes are inline; values here are robot_localization-template defaults adjusted
+# for TB3 Burger and are config-grade (no ADR needed to retune).
+
+ekf_filter_node:
+  ros__parameters:
+    frequency: 30.0
+    sensor_timeout: 0.1
+    two_d_mode: true                  # planar TB3 Burger; z/roll/pitch held at zero
+    transform_time_offset: 0.0
+    transform_timeout: 0.0
+    print_diagnostics: true
+    debug: false
+
+    # Mandatory per adr/007-nav2-map-source-slam-toolbox.md:37 — slam_toolbox uses this
+    # TF as its scan-matching motion prior.
+    publish_tf: true
+    publish_acceleration: false
+
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_footprint
+    world_frame: odom                 # local-frame fusion; map->odom comes from slam_toolbox
+
+    # ----- odom0: wheel odometry (Phase 1 stream 0) -----
+    # Subscribes to the wrapper's private topic, NOT raw /odom_wheel, per ADR-011:36.
+    odom0: /ekf_in/odom_wheel
+    # Fuse vx and vyaw only. Wheel-integrated pose drifts; let the EKF state hold the integral.
+    # Field order: x, y, z, roll, pitch, yaw, vx, vy, vz, vroll, vpitch, vyaw, ax, ay, az
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true,  false, false,
+                   false, false, true,
+                   false, false, false]
+    odom0_queue_size: 10
+    odom0_differential: false
+    odom0_relative: false
+    odom0_pose_rejection_threshold: 5.0
+    odom0_twist_rejection_threshold: 1.0
+    odom0_nodelay: false
+
+    # ----- imu0: IMU (Phase 1 stream 1) -----
+    imu0: /ekf_in/imu
+    # Fuse yaw angular velocity only. Orientation is excluded to match adr/008-sac-observation-vector.md:33-40
+    # (also excluded from the SAC observation). Linear accelerations on a flat-ground
+    # diff-drive add noise without a clear win at this stage; revisit if heading drifts.
+    imu0_config: [false, false, false,
+                  false, false, false,
+                  false, false, false,
+                  false, false, true,
+                  false, false, false]
+    imu0_queue_size: 10
+    imu0_differential: false
+    imu0_relative: false
+    imu0_pose_rejection_threshold: 0.8
+    imu0_twist_rejection_threshold: 0.8
+    imu0_linear_acceleration_rejection_threshold: 0.8
+    imu0_remove_gravitational_acceleration: true
+    imu0_nodelay: false
+
+    # 15x15 process noise covariance, ordered as the field list above.
+    # Standard robot_localization template values; tuning-grade.
+    process_noise_covariance: [0.05, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.05, 0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.06, 0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.03, 0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.03, 0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.06, 0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.025, 0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.025, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.04, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.01, 0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.01, 0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.02, 0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.01, 0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.01, 0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.015]
+
+    initial_estimate_covariance: [1e-9, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  1e-9, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  1e-9, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  1e-9, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  1e-9, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  1e-9, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  1e-9, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  1e-9, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  1e-9, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  1e-9, 0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  1e-9, 0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  1e-9, 0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  1e-9, 0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  1e-9, 0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  1e-9]
+
+
+# EKF input gate wrapper (ADR-011). Holds the nominal per-stream measurement-noise
+# diagonals that σ_wheel and σ_imu multiply, per ADR-009:25-27. The wrapper itself
+# owns σ application per ADR-014 — agent's set_parameters target is this node, not
+# ekf_filter_node. Stream names match σ subscripts in ADR-009 (wheel, imu — not the
+# topic names).
+ekf_input_gate:
+  ros__parameters:
+    # Wheel: vx and vyaw are the fused fields (odom0_config above). Order: [vx, vyaw].
+    nominal_diagonal_wheel: [0.05, 0.05]
+
+    # IMU: vyaw is the only fused field (imu0_config above). Order: [vyaw].
+    nominal_diagonal_imu: [0.02]
+
+    # σ multipliers — agent updates each cycle via set_parameters (ADR-014).
+    # Default 1.0 = nominal diagonal passes through unchanged.
+    sigma_wheel: 1.0
+    sigma_imu: 1.0
+
+    # Topic plumbing — wrapper subscribes to raw, republishes to private.
+    raw_topic_wheel: /odom_wheel
+    raw_topic_imu: /imu
+    private_topic_wheel: /ekf_in/odom_wheel
+    private_topic_imu: /ekf_in/imu
