@@ -44,6 +44,7 @@ This is a standard ROS 2 colcon workspace (`/opt/ros/jazzy`) with two packages u
         - `nodes/ekf_input_gate.py`: ADR-011/014 wrapper. Sits between raw EKF inputs and `ekf_filter_node`; applies σ × nominal-diagonal at release.
         - `nodes/release_driver.py`: Interim 10 Hz Trigger client clocking the gate. Replaced by `RLNavigation-v1.step()` once that lands.
         - `nodes/env_smoke_test.py`: Runs `RLNavigation-v0` for 50 random steps via `ros2 run rl_navigation_pkg env_smoke_test`.
+        - `nodes/reward_probe.py`: 1 Hz standalone probe comparing `/ground_truth_pose` vs `/odom`; validates the reward subtrahend path (ADR-004:39-40) before integrating into `RLNavigation-v1`.
     - `config/`
         - `ekf_phase1.yaml`: ADR-006 Phase 1 EKF + gate config (single file, dispatched by node name).
         - `slam_toolbox_params.yaml`: ADR-007 online_async config; phase-invariant.
