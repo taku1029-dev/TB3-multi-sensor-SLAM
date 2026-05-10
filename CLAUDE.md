@@ -40,10 +40,12 @@ This is a standard ROS 2 colcon workspace (`/opt/ros/jazzy`) with two packages u
 - **`rl_navigation_pkg`** — `ament_python` package hosting the RL env, the EKF-input-gate wrapper, and a stand-in release driver. SAC training and `RLNavigation-v1` are still TODO.
     - `rl_navigation_pkg/`
         - `envs/my_env.py`: `RLNavigation-v0` (MVP env, ADR-001). Lives until `RLNavigation-v1` is end-to-end.
+        - `envs/sac_env.py`: `RLNavigation-v1` (SAC env, ADR-005/008/009/010/011/012). Built up A-1 → A-3; A-4 (collision/divergence terminate) still TODO. 15-dim obs, 2-dim Box action with σ=exp(a·3), 50 ms set_parameters ack deadline, soft Gazebo reset via subprocess gz CLI in reset().
         - `agents/`: SB3 agent training and inference wrappers (planned).
         - `nodes/ekf_input_gate.py`: ADR-011/014 wrapper. Sits between raw EKF inputs and `ekf_filter_node`; applies σ × nominal-diagonal at release.
-        - `nodes/release_driver.py`: Interim 10 Hz Trigger client clocking the gate. Replaced by `RLNavigation-v1.step()` once that lands.
+        - `nodes/release_driver.py`: Interim 10 Hz Trigger client clocking the gate. Redundant once `RLNavigation-v1.step()` is the sole release driver; kept in launch so non-RL navigate_to_pose runs still get /odom flowing.
         - `nodes/env_smoke_test.py`: Runs `RLNavigation-v0` for 50 random steps via `ros2 run rl_navigation_pkg env_smoke_test`.
+        - `nodes/v1_smoke_test.py`: Runs `RLNavigation-v1` for 2 episodes × 25 random-action steps with reset() between, via `ros2 run rl_navigation_pkg v1_smoke_test`. Verifies obs decode + action wiring + reset path.
         - `nodes/reward_probe.py`: 1 Hz standalone probe comparing `/ground_truth_pose` vs `/odom`; validates the reward subtrahend path (ADR-004:39-40) before integrating into `RLNavigation-v1`.
     - `config/`
         - `ekf_phase1.yaml`: ADR-006 Phase 1 EKF + gate config (single file, dispatched by node name).
@@ -100,6 +102,7 @@ colcon test --packages-select rl_navigation_pkg --pytest-args -k test_flake8
 - **`nav2_msgs` ↔ `fastcdr` ABI mismatch in some apt-installed Jazzy environments.** Symptom: `controller_server` dies on activation with `symbol lookup error: ... libnav2_msgs__rosidl_typesupport_fastrtps_cpp.so: undefined symbol: _ZN8eprosima7fastcdr3Cdr9serializeEj`. Fix: `sudo apt install --reinstall ros-jazzy-fastcdr ros-jazzy-rmw-fastrtps-cpp ros-jazzy-rosidl-typesupport-fastrtps-cpp ros-jazzy-rosidl-typesupport-fastrtps-c ros-jazzy-nav2-msgs` to get a consistent set. Quick workaround: `export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp` (Cyclone DDS doesn't go through fastcdr).
 - **bt_navigator BT-XML param: omit, don't blank.** `default_nav_to_pose_bt_xml` and `default_nav_through_poses_bt_xml` must be **absent** from the yaml in Nav2 Jazzy for the package-shipped default to kick in. Setting them to `""` loads an empty tree → `Behavior tree threw exception: Empty Tree`. Setting them to `"$(find-pkg-share nav2_bt_navigator)/..."` pushes the literal substitution string through (yaml does not expand `$(find-pkg-share ...)`) → file-not-found → goal rejected.
 - **`while true; ros2 service call ...` is too bursty to drive the gate.** Each invocation forks a python process and re-runs rclpy init, taking 100–300 ms per call. Result: /odom updates are unstable, TF cache is intermittent, and downstream Message Filters (costmap_2d, slam_toolbox) drop scans with `'the timestamp on the message is earlier than all the data in the transform cache'`. Use a persistent Python timer node (`release_driver`) with `client.call_async(...)` instead.
+- **`gz service /world/<name>/control` with `reset: {all: true}` tears down sensor plugin entities.** Empirically (2026-05-11) the `all` reset destroys IMU and PosePublisher entities and recreates them, but existing ROS subscribers do not re-discover the new publishers within seconds — `/imu` and `/ground_truth_pose` go silent for the rest of the process while `/lidar` and `/camera/rgbd/image` survive. The downstream EKF then has no IMU input and stops publishing `/odom` too. **Use `reset: {model_only: true}` instead** — it resets all model poses to spawn while keeping sensor plugins running. See `RLNavigation-v1.reset()` for the canonical incantation.
 
 ## Working with this repo
 
