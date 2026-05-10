@@ -32,6 +32,9 @@ setup(
             'release_driver = rl_navigation_pkg.nodes.release_driver:main',
             'reward_probe = rl_navigation_pkg.nodes.reward_probe:main',
             'v1_smoke_test = rl_navigation_pkg.nodes.v1_smoke_test:main',
+            'sac_smoke_test = rl_navigation_pkg.nodes.sac_smoke_test:main',
+            'sac_trainer = rl_navigation_pkg.agents.sac_trainer:main',
+            'sac_inference = rl_navigation_pkg.agents.sac_inference:main',
         ],
     },
 )

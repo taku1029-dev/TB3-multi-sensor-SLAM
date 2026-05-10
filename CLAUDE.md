@@ -41,11 +41,13 @@ This is a standard ROS 2 colcon workspace (`/opt/ros/jazzy`) with two packages u
     - `rl_navigation_pkg/`
         - `envs/my_env.py`: `RLNavigation-v0` (MVP env, ADR-001). Lives until `RLNavigation-v1` is end-to-end.
         - `envs/sac_env.py`: `RLNavigation-v1` (SAC env, ADR-005/008/009/010/011/012). A-1..A-4 complete. 15-dim obs, 2-dim Box action with σ=exp(a·3), 50 ms set_parameters ack deadline (retry-on-timeout per ADR-012:23-30), soft Gazebo reset via subprocess gz CLI in reset(), terminated on collision/divergence, truncated on timeout/infra-failure.
-        - `agents/`: SB3 agent training and inference wrappers (planned).
+        - `agents/sac_trainer.py`: SB3 SAC training loop with `CheckpointCallback` + TensorBoard. `ros2 run rl_navigation_pkg sac_trainer --total-timesteps N --save-dir ...`. Wiring verified at 5000 steps; meaningful task-learning blocked on a Nav2 goal driver (the robot stays at spawn during training so reward is flat).
+        - `agents/sac_inference.py`: Load a saved SAC zip and roll out deterministic actions on `RLNavigation-v1`.
         - `nodes/ekf_input_gate.py`: ADR-011/014 wrapper. Sits between raw EKF inputs and `ekf_filter_node`; applies σ × nominal-diagonal at release.
         - `nodes/release_driver.py`: Interim 10 Hz Trigger client clocking the gate. Redundant once `RLNavigation-v1.step()` is the sole release driver; kept in launch so non-RL navigate_to_pose runs still get /odom flowing.
         - `nodes/env_smoke_test.py`: Runs `RLNavigation-v0` for 50 random steps via `ros2 run rl_navigation_pkg env_smoke_test`.
         - `nodes/v1_smoke_test.py`: Runs `RLNavigation-v1` for 2 episodes × 25 random-action steps with reset() between, via `ros2 run rl_navigation_pkg v1_smoke_test`. Verifies obs decode + action wiring + reset path.
+        - `nodes/sac_smoke_test.py`: 200-step SB3 SAC.learn run for `RLNavigation-v1`; confirms the SAC trainer wiring without committing to a real training run.
         - `nodes/reward_probe.py`: 1 Hz standalone probe comparing `/ground_truth_pose` vs `/odom`; validates the reward subtrahend path (ADR-004:39-40) before integrating into `RLNavigation-v1`.
     - `config/`
         - `ekf_phase1.yaml`: ADR-006 Phase 1 EKF + gate config (single file, dispatched by node name).
