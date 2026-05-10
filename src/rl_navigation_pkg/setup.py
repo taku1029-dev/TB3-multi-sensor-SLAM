@@ -31,6 +31,7 @@ setup(
             'ekf_input_gate = rl_navigation_pkg.nodes.ekf_input_gate:main',
             'release_driver = rl_navigation_pkg.nodes.release_driver:main',
             'reward_probe = rl_navigation_pkg.nodes.reward_probe:main',
+            'v1_smoke_test = rl_navigation_pkg.nodes.v1_smoke_test:main',
         ],
     },
 )
