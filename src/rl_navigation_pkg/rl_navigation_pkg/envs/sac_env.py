@@ -4,23 +4,29 @@ Topic contract per ADR-005, observation per ADR-008, action per ADR-009,
 per-cycle protocol per ADR-011, set_parameters mechanics per ADR-012,
 episode design per ADR-010.
 
-A-1 + A-2 + A-3 cut:
+A-1 + A-2 + A-3 + A-4 cut:
   - Subscribes /lidar /imu /camera/rgbd/image /odom /ground_truth_pose
   - 15-dim observation, per-feature normalised to [-1, 1] (ADR-009:35-48)
   - 2-dim action Box(-1, 1) — Phase 1 (sigma_wheel, sigma_imu)
   - step() applies σ = exp(a · 3) via /ekf_input_gate/set_parameters with a
     50 ms ack deadline (ADR-012:17-19); on success triggers
-    /ekf_input_gate/release; on timeout flags info['set_param_ok']=False
-    and zero-rewards the cycle (ADR-012:23-30)
-  - reward = -|EKF − GT| * 10 (ADR-004:39-40, verified by reward_probe)
+    /ekf_input_gate/release. Single timeouts retry the same action up to
+    SET_PARAM_MAX_RETRIES times — invisible to SAC per ADR-012:23-30. All
+    retries failing → truncated=True with info['truncated_reason']
+    ='set_param_unreachable' (ADR-012:50).
+  - /odom-silent detection: if latest_odom does not advance during the
+    100 ms spin, truncated=True with 'odom_silent' (ADR-012:51).
+  - reward = -|EKF − GT| * 10 (ADR-004:39-40, verified by reward_probe).
+  - terminated=True on collision (lidar < 0.15 m) or EKF divergence
+    (|EKF − GT| > 2.0 m) per ADR-010:21-26.
   - reset() runs the ADR-010:73 sequence: Gazebo soft reset (subprocess gz
-    CLI, interim) → wait for full sensor refresh → emit initial obs
+    CLI, interim) → wait for full sensor refresh → emit initial obs.
 
-Out of A-3 scope (A-4):
+Not yet wired:
   - slam_toolbox clear hook (the existing map persists across episodes;
     acceptable for Phase 1 because reward is on EKF pose, not the corrected
-    pose — ADR-007:46)
-  - Collision / EKF divergence terminate per ADR-010
+    pose — ADR-007:46).
+  - SAC training loop / SB3 wiring lives outside this module.
 """
 
 from __future__ import annotations
@@ -64,6 +70,9 @@ GATE_WAIT_TIMEOUT_S = 10.0
 GZ_WORLD_NAME = 'example_world'  # matches worlds/example_world.sdf <world name=...>
 GZ_RESET_TIMEOUT_S = 3.0
 RESET_TOPIC_WAIT_S = 5.0
+COLLISION_DISTANCE_M = 0.15  # ADR-010:23
+DIVERGENCE_DISTANCE_M = 2.0  # ADR-010:24
+SET_PARAM_MAX_RETRIES = 10  # ~500 ms total retry budget per cycle (ADR-012:23-30)
 
 
 class _V1Node(Node):
@@ -345,6 +354,27 @@ class SACEnv(gym.Env):
         dy = odom.pose.pose.position.y - gt.pose.position.y
         return -sqrt(dx * dx + dy * dy) * REWARD_SCALE
 
+    def _check_collision(self) -> bool:
+        """ADR-010:23 — minimum lidar return below 0.15 m means imminent contact."""
+        scan = self._node.latest_scan
+        if scan is None or len(scan.ranges) == 0:
+            return False
+        arr = np.asarray(list(scan.ranges), dtype=np.float32)
+        arr = arr[np.isfinite(arr) & (arr > scan.range_min)]
+        if arr.size == 0:
+            return False
+        return float(arr.min()) < COLLISION_DISTANCE_M
+
+    def _check_divergence(self) -> bool:
+        """ADR-010:24 — EKF pose more than 2 m from ground truth."""
+        gt = self._node.latest_gt
+        odom = self._node.latest_odom
+        if gt is None or odom is None:
+            return False
+        dx = odom.pose.pose.position.x - gt.pose.position.x
+        dy = odom.pose.pose.position.y - gt.pose.position.y
+        return sqrt(dx * dx + dy * dy) > DIVERGENCE_DISTANCE_M
+
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
         self._step_count = 0
@@ -417,13 +447,50 @@ class SACEnv(gym.Env):
         return True, sigma_wheel, sigma_imu
 
     def step(self, action):
-        set_param_ok, sigma_wheel, sigma_imu = self._apply_action(action)
+        # ADR-012:23-30: a single set_parameters timeout is invisible to SAC —
+        # retry the same action until it lands or we exhaust the budget. The
+        # exhausted case is the ADR-012:50 "wrapper unreachable" infrastructure
+        # failure and surfaces as truncated=True.
+        set_param_ok = False
+        sigma_wheel = sigma_imu = float('nan')
+        for _ in range(SET_PARAM_MAX_RETRIES):
+            set_param_ok, sigma_wheel, sigma_imu = self._apply_action(action)
+            if set_param_ok:
+                break
 
+        odom_before = self._node.latest_odom
         self._spin_for(STEP_PERIOD_S)
+        # ADR-012:51: /odom not advancing during the cycle is an infra failure.
+        # Reference identity works because each rclpy callback delivers a fresh
+        # message object.
+        odom_silent = (
+            odom_before is not None
+            and self._node.latest_odom is odom_before
+        )
+
         obs = self._build_obs()
         reward = self._compute_reward() if set_param_ok else 0.0
         self._step_count += 1
-        truncated = self._step_count >= MAX_EPISODE_STEPS
+
+        # ADR-010:21-26 termination/truncation matrix
+        collision = self._check_collision()
+        divergence = self._check_divergence()
+        terminated = collision or divergence
+
+        timeout = self._step_count >= MAX_EPISODE_STEPS
+        infra_failure = (not set_param_ok) or odom_silent
+        truncated = timeout or infra_failure
+
+        terminated_reason = (
+            'collision' if collision else 'divergence' if divergence else None
+        )
+        truncated_reason = (
+            'set_param_unreachable' if not set_param_ok
+            else 'odom_silent' if odom_silent
+            else 'timeout' if timeout
+            else None
+        )
+
         info = {
             'step': self._step_count,
             'has_scan': self._node.latest_scan is not None,
@@ -434,8 +501,10 @@ class SACEnv(gym.Env):
             'set_param_ok': set_param_ok,
             'sigma_wheel': sigma_wheel,
             'sigma_imu': sigma_imu,
+            'terminated_reason': terminated_reason,
+            'truncated_reason': truncated_reason,
         }
-        return obs, reward, False, truncated, info
+        return obs, reward, terminated, truncated, info
 
     def close(self) -> None:
         self._node.destroy_node()

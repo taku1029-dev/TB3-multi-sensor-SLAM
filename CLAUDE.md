@@ -40,7 +40,7 @@ This is a standard ROS 2 colcon workspace (`/opt/ros/jazzy`) with two packages u
 - **`rl_navigation_pkg`** — `ament_python` package hosting the RL env, the EKF-input-gate wrapper, and a stand-in release driver. SAC training and `RLNavigation-v1` are still TODO.
     - `rl_navigation_pkg/`
         - `envs/my_env.py`: `RLNavigation-v0` (MVP env, ADR-001). Lives until `RLNavigation-v1` is end-to-end.
-        - `envs/sac_env.py`: `RLNavigation-v1` (SAC env, ADR-005/008/009/010/011/012). Built up A-1 → A-3; A-4 (collision/divergence terminate) still TODO. 15-dim obs, 2-dim Box action with σ=exp(a·3), 50 ms set_parameters ack deadline, soft Gazebo reset via subprocess gz CLI in reset().
+        - `envs/sac_env.py`: `RLNavigation-v1` (SAC env, ADR-005/008/009/010/011/012). A-1..A-4 complete. 15-dim obs, 2-dim Box action with σ=exp(a·3), 50 ms set_parameters ack deadline (retry-on-timeout per ADR-012:23-30), soft Gazebo reset via subprocess gz CLI in reset(), terminated on collision/divergence, truncated on timeout/infra-failure.
         - `agents/`: SB3 agent training and inference wrappers (planned).
         - `nodes/ekf_input_gate.py`: ADR-011/014 wrapper. Sits between raw EKF inputs and `ekf_filter_node`; applies σ × nominal-diagonal at release.
         - `nodes/release_driver.py`: Interim 10 Hz Trigger client clocking the gate. Redundant once `RLNavigation-v1.step()` is the sole release driver; kept in launch so non-RL navigate_to_pose runs still get /odom flowing.

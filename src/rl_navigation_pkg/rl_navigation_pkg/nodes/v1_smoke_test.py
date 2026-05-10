@@ -58,7 +58,13 @@ def main() -> None:
             obs, reward, terminated, truncated, info = env.step(action)
             _step_log(i, action, reward, obs, info)
             if terminated or truncated:
-                print(f'  episode end at step {i}: terminated={terminated} truncated={truncated}')
+                tr = info.get('terminated_reason')
+                tc = info.get('truncated_reason')
+                print(
+                    f'  episode end at step {i}: '
+                    f'terminated={terminated} ({tr}) '
+                    f'truncated={truncated} ({tc})'
+                )
                 break
 
     env.close()
