@@ -20,53 +20,6 @@
 			<render_engine>ogre2</render_engine>
 		</plugin>
 
-		<!-- Temporary object -->
-		<model name='traffic_cone'>
-			<static>true</static> <pose>2.0 0.0 0.0 0.0 0.0 0.0</pose> <link name='link'>
-				<collision name='collision'>
-					<geometry>
-						<cone>
-							<radius>3.0</radius> <length>1.5</length> </cone>
-					</geometry>
-				</collision>
-				<visual name='visual'>
-					<geometry>
-						<cone>
-							<radius>3.0</radius>
-							<length>2.5</length>
-						</cone>
-					</geometry>
-					<material>
-						<ambient>1 0.5 0 1</ambient> <diffuse>1 0.5 0 1</diffuse>
-					</material>
-				</visual>
-			</link>
-		</model>
-		<model name="my_sphere">
-			<pose>0 2 0 0 0 0</pose> <link name="link">
-				<collision name="collision">
-					<geometry>
-						<sphere>
-							<radius>0.3</radius>
-						</sphere>
-					</geometry>
-				</collision>
-				<visual name="visual">
-					<geometry>
-						<sphere>
-							<radius>0.5</radius>
-						</sphere>
-					</geometry>
-					<material>
-						<script>
-							<uri>file://media/materials/scripts/gazebo.material</uri>
-							<name>Gazebo/Blue</name>
-						</script>
-					</material>
-				</visual>
-			</link>
-		</model>
-
 		<light type="directional" name="sun">
 			<cast_shadows>true</cast_shadows>
 			<pose>0 0 10 0 0 0</pose>
