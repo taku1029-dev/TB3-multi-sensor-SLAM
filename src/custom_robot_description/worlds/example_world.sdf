@@ -60,5 +60,147 @@
 				</visual>
 			</link>
 		</model>
+
+		<!-- Training arena: 10x10 m enclosure + interior obstacles.
+		     Designed so /lidar produces meaningful sector variance and partial
+		     blockage signals for ADR-008 Block A features (which would otherwise
+		     all saturate in an empty world). Robot spawns at (0,0,0); 1 m of
+		     clearance around spawn keeps reset() collision-free. -->
+
+		<model name="wall_north">
+			<static>true</static>
+			<pose>0 5 0.25 0 0 0</pose>
+			<link name="link">
+				<collision name="collision">
+					<geometry><box><size>10 0.1 0.5</size></box></geometry>
+				</collision>
+				<visual name="visual">
+					<geometry><box><size>10 0.1 0.5</size></box></geometry>
+					<material>
+						<ambient>0.5 0.5 0.5 1</ambient>
+						<diffuse>0.7 0.7 0.7 1</diffuse>
+					</material>
+				</visual>
+			</link>
+		</model>
+
+		<model name="wall_south">
+			<static>true</static>
+			<pose>0 -5 0.25 0 0 0</pose>
+			<link name="link">
+				<collision name="collision">
+					<geometry><box><size>10 0.1 0.5</size></box></geometry>
+				</collision>
+				<visual name="visual">
+					<geometry><box><size>10 0.1 0.5</size></box></geometry>
+					<material>
+						<ambient>0.5 0.5 0.5 1</ambient>
+						<diffuse>0.7 0.7 0.7 1</diffuse>
+					</material>
+				</visual>
+			</link>
+		</model>
+
+		<model name="wall_east">
+			<static>true</static>
+			<pose>5 0 0.25 0 0 0</pose>
+			<link name="link">
+				<collision name="collision">
+					<geometry><box><size>0.1 10 0.5</size></box></geometry>
+				</collision>
+				<visual name="visual">
+					<geometry><box><size>0.1 10 0.5</size></box></geometry>
+					<material>
+						<ambient>0.5 0.5 0.5 1</ambient>
+						<diffuse>0.7 0.7 0.7 1</diffuse>
+					</material>
+				</visual>
+			</link>
+		</model>
+
+		<model name="wall_west">
+			<static>true</static>
+			<pose>-5 0 0.25 0 0 0</pose>
+			<link name="link">
+				<collision name="collision">
+					<geometry><box><size>0.1 10 0.5</size></box></geometry>
+				</collision>
+				<visual name="visual">
+					<geometry><box><size>0.1 10 0.5</size></box></geometry>
+					<material>
+						<ambient>0.5 0.5 0.5 1</ambient>
+						<diffuse>0.7 0.7 0.7 1</diffuse>
+					</material>
+				</visual>
+			</link>
+		</model>
+
+		<model name="pillar_ne">
+			<static>true</static>
+			<pose>1.5 2.0 0.25 0 0 0</pose>
+			<link name="link">
+				<collision name="collision">
+					<geometry><cylinder><radius>0.2</radius><length>0.5</length></cylinder></geometry>
+				</collision>
+				<visual name="visual">
+					<geometry><cylinder><radius>0.2</radius><length>0.5</length></cylinder></geometry>
+					<material>
+						<ambient>0.6 0.2 0.2 1</ambient>
+						<diffuse>0.8 0.2 0.2 1</diffuse>
+					</material>
+				</visual>
+			</link>
+		</model>
+
+		<model name="pillar_se">
+			<static>true</static>
+			<pose>1.0 -2.0 0.25 0 0 0</pose>
+			<link name="link">
+				<collision name="collision">
+					<geometry><cylinder><radius>0.2</radius><length>0.5</length></cylinder></geometry>
+				</collision>
+				<visual name="visual">
+					<geometry><cylinder><radius>0.2</radius><length>0.5</length></cylinder></geometry>
+					<material>
+						<ambient>0.2 0.5 0.2 1</ambient>
+						<diffuse>0.2 0.7 0.2 1</diffuse>
+					</material>
+				</visual>
+			</link>
+		</model>
+
+		<model name="pillar_sw">
+			<static>true</static>
+			<pose>-2.0 -1.5 0.25 0 0 0</pose>
+			<link name="link">
+				<collision name="collision">
+					<geometry><cylinder><radius>0.2</radius><length>0.5</length></cylinder></geometry>
+				</collision>
+				<visual name="visual">
+					<geometry><cylinder><radius>0.2</radius><length>0.5</length></cylinder></geometry>
+					<material>
+						<ambient>0.2 0.2 0.6 1</ambient>
+						<diffuse>0.2 0.2 0.8 1</diffuse>
+					</material>
+				</visual>
+			</link>
+		</model>
+
+		<model name="box_nw">
+			<static>true</static>
+			<pose>-2.0 2.0 0.25 0 0 0</pose>
+			<link name="link">
+				<collision name="collision">
+					<geometry><box><size>0.4 0.4 0.5</size></box></geometry>
+				</collision>
+				<visual name="visual">
+					<geometry><box><size>0.4 0.4 0.5</size></box></geometry>
+					<material>
+						<ambient>0.6 0.6 0.2 1</ambient>
+						<diffuse>0.8 0.8 0.2 1</diffuse>
+					</material>
+				</visual>
+			</link>
+		</model>
 	</world>
 </sdf>
