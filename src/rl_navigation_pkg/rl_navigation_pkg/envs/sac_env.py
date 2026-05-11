@@ -4,7 +4,7 @@ Topic contract per ADR-005, observation per ADR-008, action per ADR-009,
 per-cycle protocol per ADR-011, set_parameters mechanics per ADR-012,
 episode design per ADR-010.
 
-A-1 + A-2 + A-3 + A-4 cut:
+A-1 + A-2 + A-3 + A-4 + SAC-4 cut:
   - Subscribes /lidar /imu /camera/rgbd/image /odom /ground_truth_pose
   - 15-dim observation, per-feature normalised to [-1, 1] (ADR-009:35-48)
   - 2-dim action Box(-1, 1) — Phase 1 (sigma_wheel, sigma_imu)
@@ -21,6 +21,11 @@ A-1 + A-2 + A-3 + A-4 cut:
     (|EKF − GT| > 2.0 m) per ADR-010:21-26.
   - reset() runs the ADR-010:73 sequence: Gazebo soft reset (subprocess gz
     CLI, interim) → wait for full sensor refresh → emit initial obs.
+  - Nav2 random-goal driver per ADR-010:72: reset() cancels any in-flight
+    NavigateToPose goal then sends a fresh uniform-random goal within world
+    bounds (rejection-sampled away from obstacles + spawn). step() detects
+    goal completion and re-samples mid-episode so the robot stays moving
+    for the full 60-s window.
 
 Not yet wired:
   - slam_toolbox clear hook (the existing map persists across episodes;
@@ -40,9 +45,13 @@ import numpy as np
 import rclpy
 from geometry_msgs.msg import PoseStamped
 from gymnasium import spaces
+from lifecycle_msgs.msg import Transition
+from lifecycle_msgs.srv import ChangeState
+from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import Odometry
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
 from rcl_interfaces.srv import SetParameters
+from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image, Imu, LaserScan
@@ -68,11 +77,45 @@ SET_PARAM_TIMEOUT_S = 0.05  # ADR-012:17-19
 GATE_NAMESPACE = '/ekf_input_gate'
 GATE_WAIT_TIMEOUT_S = 10.0
 GZ_WORLD_NAME = 'example_world'  # matches worlds/example_world.sdf <world name=...>
+GZ_ROBOT_NAME = 'custom_robot'   # matches `-name custom_robot` in spawn_robot.launch.py
 GZ_RESET_TIMEOUT_S = 3.0
 RESET_TOPIC_WAIT_S = 5.0
 COLLISION_DISTANCE_M = 0.15  # ADR-010:23
 DIVERGENCE_DISTANCE_M = 2.0  # ADR-010:24
 SET_PARAM_MAX_RETRIES = 10  # ~500 ms total retry budget per cycle (ADR-012:23-30)
+
+# Nav2 random-goal driver (ADR-010:72). World bounds give 1 m wall margin from
+# the 10x10 m arena in worlds/example_world.sdf. Obstacle centres + radius are
+# hard-coded to match that SDF — when the world changes, update both. Goals
+# closer than MIN_GOAL_DIST_FROM_SPAWN to (0,0) are rejected so trivial 0-cm
+# navigation tasks don't dominate.
+NAV_ACTION_NAME = '/navigate_to_pose'
+NAV_WAIT_TIMEOUT_S = 10.0
+WORLD_BOUND_X = (-4.0, 4.0)
+WORLD_BOUND_Y = (-4.0, 4.0)
+GOAL_FORBIDDEN_CENTERS = (
+    (1.5, 2.0),    # pillar_ne
+    (1.0, -2.0),   # pillar_se
+    (-2.0, -1.5),  # pillar_sw
+    (-2.0, 2.0),   # box_nw
+)
+GOAL_OBSTACLE_RADIUS_M = 0.5  # robot radius 0.105 + obstacle radius 0.2 + slack
+MIN_GOAL_DIST_FROM_SPAWN = 1.0
+GOAL_REJECT_BUDGET = 100
+GOAL_FALLBACK = (2.0, 0.0)  # known-clear point if rejection sampling exhausts
+
+# slam_toolbox lifecycle reset (ADR-010:62 — rebuild map each episode).
+# slam_toolbox does not expose a clear_map service, so we cycle the lifecycle:
+# active → inactive → unconfigured → inactive → active rebuilds the pose graph
+# and the occupancy grid from scratch.
+SLAM_LIFECYCLE_NAMESPACE = '/slam_toolbox'
+SLAM_LIFECYCLE_TRANSITION_TIMEOUT_S = 3.0
+SLAM_LIFECYCLE_RESET_SEQUENCE = (
+    Transition.TRANSITION_DEACTIVATE,
+    Transition.TRANSITION_CLEANUP,
+    Transition.TRANSITION_CONFIGURE,
+    Transition.TRANSITION_ACTIVATE,
+)
 
 
 class _V1Node(Node):
@@ -99,6 +142,22 @@ class _V1Node(Node):
         )
         self.release_client = self.create_client(Trigger, f'{GATE_NAMESPACE}/release')
 
+        # ADR-010:72 random-goal driver. State machine:
+        #   _send_future is set → callback consumes it, sets _result_future
+        #   _result_future is set → callback fires _goal_done = True
+        # _goal_done=True means step() should resample and call send_goal again.
+        self.nav_client = ActionClient(self, NavigateToPose, NAV_ACTION_NAME)
+        self._send_future = None
+        self._result_future = None
+        self._goal_handle = None
+        self._goal_done = True  # no goal in flight at startup
+        self._current_goal_xy: tuple[float, float] | None = None
+
+        # ADR-010:62: rebuild slam_toolbox each episode via lifecycle.
+        self.slam_state_client = self.create_client(
+            ChangeState, f'{SLAM_LIFECYCLE_NAMESPACE}/change_state'
+        )
+
     def _on_scan(self, msg: LaserScan) -> None:
         self.latest_scan = msg
 
@@ -113,6 +172,53 @@ class _V1Node(Node):
 
     def _on_gt(self, msg: PoseStamped) -> None:
         self.latest_gt = msg
+
+    def send_goal(self, x: float, y: float) -> None:
+        """Send a NavigateToPose goal. Fire-and-forget; completion is observed
+        via the future-callback chain set up below."""
+        msg = NavigateToPose.Goal()
+        msg.pose.header.frame_id = 'map'
+        msg.pose.header.stamp = self.get_clock().now().to_msg()
+        msg.pose.pose.position.x = float(x)
+        msg.pose.pose.position.y = float(y)
+        msg.pose.pose.orientation.w = 1.0  # facing +x
+
+        self._goal_done = False
+        self._goal_handle = None
+        self._result_future = None
+        self._current_goal_xy = (float(x), float(y))
+        self._send_future = self.nav_client.send_goal_async(msg)
+        self._send_future.add_done_callback(self._on_goal_response)
+
+    def _on_goal_response(self, future) -> None:
+        handle = future.result()
+        self._send_future = None
+        if handle is None or not handle.accepted:
+            self.get_logger().warn(
+                f'NavigateToPose goal {self._current_goal_xy} rejected by Nav2'
+            )
+            self._goal_done = True
+            self._current_goal_xy = None
+            return
+        self._goal_handle = handle
+        self._result_future = handle.get_result_async()
+        self._result_future.add_done_callback(self._on_goal_result)
+
+    def _on_goal_result(self, _future) -> None:
+        self._goal_done = True
+        self._goal_handle = None
+        self._result_future = None
+
+    def cancel_active_goal(self) -> None:
+        """Best-effort cancellation. Used at episode reset so the in-flight goal
+        does not fight the upcoming Gazebo soft reset."""
+        if self._goal_handle is not None and self._goal_handle.accepted:
+            self._goal_handle.cancel_goal_async()
+        self._send_future = None
+        self._result_future = None
+        self._goal_handle = None
+        self._goal_done = True
+        self._current_goal_xy = None
 
 
 def _lidar_quality(scan: LaserScan | None) -> tuple[float, float, float, float]:
@@ -264,6 +370,16 @@ class SACEnv(gym.Env):
                 'step() will skip cycles (set_param_ok=False).'
             )
 
+        nav_ready = self._node.nav_client.wait_for_server(
+            timeout_sec=NAV_WAIT_TIMEOUT_S
+        )
+        if not nav_ready:
+            self._node.get_logger().warn(
+                f'{NAV_ACTION_NAME} action server not ready within '
+                f'{NAV_WAIT_TIMEOUT_S}s; the random-goal driver will be inert '
+                'and the robot will sit still.'
+            )
+
     def _spin_for(self, duration_s: float) -> None:
         deadline = time.monotonic() + duration_s
         while time.monotonic() < deadline:
@@ -294,20 +410,26 @@ class SACEnv(gym.Env):
         return False
 
     def _gz_reset_world(self) -> bool:
-        """Soft reset Gazebo via the gz service CLI (interim path).
+        """Two-step soft reset (interim subprocess path):
 
-        ADR-010:55-60 specifies `/world/<name>/control` with reset_simulation.
-        We use `model_only: true` rather than `all: true` because the latter
-        tears down sensor plugin entities (IMU, PosePublisher) which leaves
-        their ROS publishers silent — observed empirically 2026-05-11 as
-        IMU/GT/odom not recovering after reset. `model_only` resets model
-        poses only, preserving sensors/scene/plugins.
+        (1) `/world/<name>/control` with `reset: {model_only: true}` — zeroes
+            velocities for all models and resets the SDF-registered ones (walls,
+            obstacles) to their initial poses. We avoid `all: true` because it
+            tears down sensor plugin entities, leaving IMU/PosePublisher silent
+            for the rest of the process (verified 2026-05-11).
+        (2) `/world/<name>/set_pose` with `name: <robot>, position: {0,0,0}`
+            — explicitly teleports the dynamically-spawned robot back to spawn.
+            `ros_gz_sim create` does not register the spawn pose as the
+            "initial pose" that WorldControl.reset would restore, so model_only
+            reset on its own leaves the robot wherever the previous episode
+            ended (observed 2026-05-12).
 
-        Once ros_gz_bridge's service bridge is wired into the launch we should
-        replace this subprocess shell-out with a persistent rclpy client.
+        Once ros_gz_bridge's service bridge is wired into the launch this
+        should be replaced with persistent rclpy clients to remove the
+        subprocess overhead from every reset.
         """
         try:
-            result = subprocess.run(
+            ctrl = subprocess.run(
                 ['gz', 'service',
                  '-s', f'/world/{GZ_WORLD_NAME}/control',
                  '--reqtype', 'gz.msgs.WorldControl',
@@ -318,16 +440,40 @@ class SACEnv(gym.Env):
                 text=True,
                 timeout=GZ_RESET_TIMEOUT_S,
             )
+            ctrl_ok = ctrl.returncode == 0 and 'true' in ctrl.stdout.lower()
+            if not ctrl_ok:
+                self._node.get_logger().warn(
+                    f'gazebo control reset returned rc={ctrl.returncode} '
+                    f'stdout={ctrl.stdout!r} stderr={ctrl.stderr!r}'
+                )
+
+            pose_req = (
+                f'name: "{GZ_ROBOT_NAME}", '
+                'position: {x: 0.0, y: 0.0, z: 0.0}, '
+                'orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}'
+            )
+            pose = subprocess.run(
+                ['gz', 'service',
+                 '-s', f'/world/{GZ_WORLD_NAME}/set_pose',
+                 '--reqtype', 'gz.msgs.Pose',
+                 '--reptype', 'gz.msgs.Boolean',
+                 '--timeout', '500',
+                 '--req', pose_req],
+                capture_output=True,
+                text=True,
+                timeout=GZ_RESET_TIMEOUT_S,
+            )
+            pose_ok = pose.returncode == 0 and 'true' in pose.stdout.lower()
+            if not pose_ok:
+                self._node.get_logger().warn(
+                    f'gazebo set_pose for {GZ_ROBOT_NAME} returned '
+                    f'rc={pose.returncode} stdout={pose.stdout!r} '
+                    f'stderr={pose.stderr!r}'
+                )
         except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
             self._node.get_logger().warn(f'gazebo reset failed: {exc}')
             return False
-        ok = result.returncode == 0 and 'true' in result.stdout.lower()
-        if not ok:
-            self._node.get_logger().warn(
-                f'gazebo reset returned rc={result.returncode} '
-                f'stdout={result.stdout!r} stderr={result.stderr!r}'
-            )
-        return ok
+        return ctrl_ok and pose_ok
 
     def _drop_buffers(self) -> None:
         n = self._node
@@ -336,6 +482,38 @@ class SACEnv(gym.Env):
         n.latest_image = None
         n.latest_odom = None
         n.latest_gt = None
+
+    def _slam_lifecycle_transition(self, transition_id: int) -> bool:
+        """Best-effort lifecycle transition. Returns True iff slam_toolbox
+        accepted the transition. False on any failure (service not ready,
+        timeout, transition rejected) — the caller logs and continues."""
+        if not self._node.slam_state_client.service_is_ready():
+            return False
+        req = ChangeState.Request()
+        req.transition.id = transition_id
+        future = self._node.slam_state_client.call_async(req)
+        rclpy.spin_until_future_complete(
+            self._node, future, timeout_sec=SLAM_LIFECYCLE_TRANSITION_TIMEOUT_S
+        )
+        if not future.done():
+            return False
+        result = future.result()
+        return result is not None and bool(result.success)
+
+    def _slam_full_reset(self) -> bool:
+        """ADR-010:62: rebuild slam_toolbox each episode by cycling its
+        lifecycle. Returns True iff every transition in the sequence
+        succeeded; on partial failure, slam_toolbox may be in any state and
+        the caller should log but proceed (the topic-wait that follows will
+        catch a stuck node by failing to receive fresh /odom)."""
+        for transition_id in SLAM_LIFECYCLE_RESET_SEQUENCE:
+            if not self._slam_lifecycle_transition(transition_id):
+                self._node.get_logger().warn(
+                    f'slam_toolbox lifecycle transition {transition_id} failed; '
+                    'map may be stale this episode'
+                )
+                return False
+        return True
 
     def _build_obs(self) -> np.ndarray:
         return _normalise(
@@ -375,14 +553,51 @@ class SACEnv(gym.Env):
         dy = odom.pose.pose.position.y - gt.pose.position.y
         return sqrt(dx * dx + dy * dy) > DIVERGENCE_DISTANCE_M
 
+    def _sample_random_goal(self) -> tuple[float, float]:
+        """Uniform-random (x, y) in WORLD_BOUND_*, rejection-sampled away from
+        the four obstacles and the spawn point. Returns the configured fallback
+        if the rejection budget is exhausted (should not happen with the current
+        arena, but keeps the env resilient if obstacles are added)."""
+        for _ in range(GOAL_REJECT_BUDGET):
+            x = float(self.np_random.uniform(*WORLD_BOUND_X))
+            y = float(self.np_random.uniform(*WORLD_BOUND_Y))
+            if x * x + y * y < MIN_GOAL_DIST_FROM_SPAWN ** 2:
+                continue
+            blocked = False
+            for ox, oy in GOAL_FORBIDDEN_CENTERS:
+                if (x - ox) ** 2 + (y - oy) ** 2 < GOAL_OBSTACLE_RADIUS_M ** 2:
+                    blocked = True
+                    break
+            if not blocked:
+                return x, y
+        self._node.get_logger().warn(
+            f'goal rejection sampling exhausted {GOAL_REJECT_BUDGET} attempts; '
+            f'using fallback {GOAL_FALLBACK}'
+        )
+        return GOAL_FALLBACK
+
+    def _send_random_goal(self) -> tuple[float, float]:
+        x, y = self._sample_random_goal()
+        self._node.send_goal(x, y)
+        return x, y
+
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
         self._step_count = 0
 
-        # ADR-010:73 reset sequence. slam_toolbox clear is intentionally skipped
-        # in A-3; the persisted map does not affect the EKF-based reward
-        # (ADR-007:46) and Phase 1 training tolerates it.
+        # ADR-010:73 reset sequence:
+        # (1) cancel any in-flight Nav2 goal so /cmd_vel stops fighting the
+        #     upcoming Gazebo soft reset
+        # (2) Gazebo model_only soft reset → robot back at spawn
+        # (3) slam_toolbox lifecycle reset → fresh pose graph + map (ADR-010:62
+        #     and ADR-010:43-47 require rebuilding the map each episode; without
+        #     this, Nav2 plans against stale map cells and the goal-completion
+        #     callback fires on every step from rejected/instant-success goals)
+        # (4) drop subscriber buffers and wait for fresh sensor messages
+        # (5) send the next random goal so step() inherits a moving robot
+        self._node.cancel_active_goal()
         gz_ok = self._gz_reset_world()
+        slam_ok = self._slam_full_reset()
         self._drop_buffers()
         topics_ok = self._wait_for_initial_obs(RESET_TOPIC_WAIT_S)
         if not topics_ok:
@@ -390,9 +605,12 @@ class SACEnv(gym.Env):
                 f'reset: not all topics refreshed within {RESET_TOPIC_WAIT_S}s; '
                 'returning partial obs (zeros for missing channels)'
             )
+        goal_xy = self._send_random_goal()
         return self._build_obs(), {
             'gz_reset_ok': gz_ok,
+            'slam_reset_ok': slam_ok,
             'topics_ready': topics_ok,
+            'goal_xy': goal_xy,
         }
 
     def _apply_action(self, action) -> tuple[bool, float, float]:
@@ -468,6 +686,13 @@ class SACEnv(gym.Env):
             and self._node.latest_odom is odom_before
         )
 
+        # ADR-010:72 — re-sample the moment Nav2 reports the current goal
+        # finished (succeeded, aborted, or rejected). Keeps the robot moving
+        # for the whole episode rather than parking after the first arrival.
+        new_goal_xy = None
+        if self._node._goal_done:
+            new_goal_xy = self._send_random_goal()
+
         obs = self._build_obs()
         reward = self._compute_reward() if set_param_ok else 0.0
         self._step_count += 1
@@ -503,10 +728,19 @@ class SACEnv(gym.Env):
             'sigma_imu': sigma_imu,
             'terminated_reason': terminated_reason,
             'truncated_reason': truncated_reason,
+            'goal_xy': self._node._current_goal_xy,
+            'goal_resampled': new_goal_xy is not None,
         }
         return obs, reward, terminated, truncated, info
 
     def close(self) -> None:
+        # Cancel the in-flight Nav2 goal so the robot stops moving when the
+        # trainer / smoke test exits. Wrapped in try/except because rclpy may
+        # already be shutting down (e.g. KeyboardInterrupt during learn()).
+        try:
+            self._node.cancel_active_goal()
+        except Exception:  # noqa: BLE001
+            pass
         self._node.destroy_node()
         if self._owns_rclpy and rclpy.ok():
             rclpy.shutdown()

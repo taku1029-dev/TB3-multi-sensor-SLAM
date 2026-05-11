@@ -5,12 +5,18 @@ catches buffer-not-clearing and reset-once-only bugs.
 
 What to check in the output:
   - reset info shows gz_reset_ok=True and topics_ready=True
+  - reset info has a fresh goal_xy (Nav2 random-goal driver, ADR-010:72)
   - step 0's recv flags are ALL True (no boot lag, courtesy of A-3's
     _wait_for_initial_obs)
   - σ samples cover [0.05, 20] log-space
   - set_param_ok=True for every step (gate ack < 50 ms)
   - Block D not stuck at [1, 1, 1] now that COV_MAX = 10
-  - reward is non-zero once /odom drifts from /ground_truth_pose
+  - reward magnitude grows above the static-robot baseline as the robot
+    actually moves toward goals (Phase 1 EKF drift accumulates with motion)
+  - Occasional `goal=(...)*` lines mark mid-episode goal re-sampling when
+    the robot reaches the previous one
+
+100 steps/episode × 2 episodes ≈ 20 s of motion + ~5 s reset overhead.
 """
 
 import gymnasium as gym
@@ -18,13 +24,17 @@ import gymnasium as gym
 import rl_navigation_pkg.envs  # noqa: F401  (registers RLNavigation-v0/v1)
 
 EPISODES = 2
-STEPS_PER_EPISODE = 25
+STEPS_PER_EPISODE = 100
 
 
 def _step_log(i: int, action, reward: float, obs, info: dict) -> None:
     sw = info.get('sigma_wheel', float('nan'))
     si = info.get('sigma_imu', float('nan'))
     sp_ok = info.get('set_param_ok', False)
+    goal = info.get('goal_xy')
+    goal_str = f'goal=({goal[0]:+.2f},{goal[1]:+.2f})' if goal else 'goal=None'
+    if info.get('goal_resampled'):
+        goal_str += '*'  # marks "resampled this step"
     recv = (
         f"scan={info['has_scan']:1} imu={info['has_imu']:1} "
         f"img={info['has_image']:1} odom={info['has_odom']:1} "
@@ -35,9 +45,8 @@ def _step_log(i: int, action, reward: float, obs, info: dict) -> None:
         f'a=[{action[0]:+.2f}, {action[1]:+.2f}]  '
         f'σ=({sw:6.3f},{si:6.3f}) ok={sp_ok!s:5}  '
         f'r={reward:+.3f}  '
+        f'{goal_str}  '
         f'A={obs[0:4].round(3)}  '
-        f'B={obs[4:6].round(3)}  '
-        f'C={obs[6:12].round(3)}  '
         f'D={obs[12:15].round(3)}  '
         f'{recv}'
     )
