@@ -45,8 +45,8 @@ import numpy as np
 import rclpy
 from geometry_msgs.msg import PoseStamped
 from gymnasium import spaces
-from lifecycle_msgs.msg import Transition
-from lifecycle_msgs.srv import ChangeState
+from lifecycle_msgs.msg import State, Transition
+from lifecycle_msgs.srv import ChangeState, GetState
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import Odometry
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
@@ -156,6 +156,12 @@ class _V1Node(Node):
         # ADR-010:62: rebuild slam_toolbox each episode via lifecycle.
         self.slam_state_client = self.create_client(
             ChangeState, f'{SLAM_LIFECYCLE_NAMESPACE}/change_state'
+        )
+        # GetState is purely diagnostic — used by SACEnv's slam reset helper
+        # to print what state slam_toolbox was in before/after each
+        # transition attempt, so the next failure surfaces actionable info.
+        self.slam_get_state_client = self.create_client(
+            GetState, f'{SLAM_LIFECYCLE_NAMESPACE}/get_state'
         )
 
     def _on_scan(self, msg: LaserScan) -> None:
@@ -483,29 +489,80 @@ class SACEnv(gym.Env):
         n.latest_odom = None
         n.latest_gt = None
 
+    def _slam_get_state(self) -> str:
+        """Query slam_toolbox's current lifecycle state. Returns a short label
+        ('unknown' on any failure). Diagnostic-only; never affects control
+        flow."""
+        if not self._node.slam_get_state_client.service_is_ready():
+            return 'unknown(service-not-ready)'
+        future = self._node.slam_get_state_client.call_async(GetState.Request())
+        rclpy.spin_until_future_complete(
+            self._node, future, timeout_sec=SLAM_LIFECYCLE_TRANSITION_TIMEOUT_S
+        )
+        if not future.done():
+            return 'unknown(get_state-timeout)'
+        result = future.result()
+        if result is None:
+            return 'unknown(get_state-empty)'
+        return result.current_state.label or f'id={result.current_state.id}'
+
     def _slam_lifecycle_transition(self, transition_id: int) -> bool:
-        """Best-effort lifecycle transition. Returns True iff slam_toolbox
-        accepted the transition. False on any failure (service not ready,
-        timeout, transition rejected) — the caller logs and continues."""
+        """Best-effort lifecycle transition with diagnostic logging.
+
+        Returns True iff slam_toolbox accepted the transition. False on any
+        failure (service not ready, timeout, transition rejected). On
+        failure, the WARN log includes slam_toolbox's state before AND after
+        the transition attempt — needed because empirically slam_toolbox's
+        second deactivate after a full cleanup→configure→activate cycle
+        returns success=False with no other signal. SAC-6 will use this
+        empirical record to decide between (a) `clear_changes`, (b) bypass
+        via nav2_map_server, or (c) process kill+respawn.
+        """
         if not self._node.slam_state_client.service_is_ready():
+            self._node.get_logger().warn(
+                f'slam change_state service not ready for transition={transition_id}'
+            )
             return False
+
+        state_before = self._slam_get_state()
         req = ChangeState.Request()
         req.transition.id = transition_id
         future = self._node.slam_state_client.call_async(req)
         rclpy.spin_until_future_complete(
             self._node, future, timeout_sec=SLAM_LIFECYCLE_TRANSITION_TIMEOUT_S
         )
+
         if not future.done():
+            self._node.get_logger().warn(
+                f'slam change_state(transition={transition_id}) timed out '
+                f'after {SLAM_LIFECYCLE_TRANSITION_TIMEOUT_S}s; '
+                f'state_before={state_before}'
+            )
             return False
+
         result = future.result()
-        return result is not None and bool(result.success)
+        success = result is not None and bool(result.success)
+        if not success:
+            state_after = self._slam_get_state()
+            self._node.get_logger().warn(
+                f'slam change_state(transition={transition_id}) success=False; '
+                f'state_before={state_before} state_after={state_after}'
+            )
+        return success
 
     def _slam_full_reset(self) -> bool:
         """ADR-010:62: rebuild slam_toolbox each episode by cycling its
         lifecycle. Returns True iff every transition in the sequence
         succeeded; on partial failure, slam_toolbox may be in any state and
         the caller should log but proceed (the topic-wait that follows will
-        catch a stuck node by failing to receive fresh /odom)."""
+        catch a stuck node by failing to receive fresh /odom).
+
+        Known limitation (SAC-6): empirically the first env-driven reset
+        succeeds but the second one fails on DEACTIVATE — slam_toolbox
+        appears not to support being cycled through cleanup more than once
+        per process lifetime. _slam_lifecycle_transition above logs
+        state_before/state_after for the next investigation pass.
+        """
         for transition_id in SLAM_LIFECYCLE_RESET_SEQUENCE:
             if not self._slam_lifecycle_transition(transition_id):
                 self._node.get_logger().warn(

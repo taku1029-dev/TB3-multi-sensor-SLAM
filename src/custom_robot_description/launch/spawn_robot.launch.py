@@ -6,6 +6,7 @@ from launch.actions import (
     AppendEnvironmentVariable,
     EmitEvent,
     IncludeLaunchDescription,
+    OpaqueFunction,
     RegisterEventHandler,
     SetEnvironmentVariable,
 )
@@ -48,6 +49,25 @@ def generate_launch_description():
         parameters=[slam_toolbox_config, {'use_sim_time': True}],
         output='screen',
     )
+
+    # ADR-010:62 / SAC-5: slam_toolbox's initial activation is auto-driven on
+    # the configure→inactive transition. The handler must fire ONLY on the
+    # first such transition — otherwise `RLNavigation-v1.reset()`'s manual
+    # `deactivate → cleanup → configure → activate` cycle races with this
+    # handler re-emitting ACTIVATE every time slam lands in `inactive`, and
+    # the env's deactivate gets reported as `success=False`. A closure flag
+    # inside an OpaqueFunction makes the entity one-shot without needing to
+    # un-register the event handler itself.
+    _slam_initial_activate_fired = {'value': False}
+
+    def _slam_initial_activate(context, *args, **kwargs):
+        if _slam_initial_activate_fired['value']:
+            return []
+        _slam_initial_activate_fired['value'] = True
+        return [EmitEvent(event=ChangeState(
+            lifecycle_node_matcher=matches_action(slam_toolbox_node),
+            transition_id=Transition.TRANSITION_ACTIVATE,
+        ))]
 
     # with open(urdf_file, 'r') as file_handler:
     #     robot_desc = file_handler.read()
@@ -185,10 +205,7 @@ def generate_launch_description():
         RegisterEventHandler(OnStateTransition(
             target_lifecycle_node=slam_toolbox_node,
             goal_state='inactive',
-            entities=[EmitEvent(event=ChangeState(
-                lifecycle_node_matcher=matches_action(slam_toolbox_node),
-                transition_id=Transition.TRANSITION_ACTIVATE,
-            ))],
+            entities=[OpaqueFunction(function=_slam_initial_activate)],
         )),
 
         # Nav2 stack (ADR-013): NavfnPlanner + RegulatedPurePursuitController + stock BT.
