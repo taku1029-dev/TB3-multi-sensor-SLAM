@@ -40,38 +40,19 @@ def generate_launch_description():
         FindPackageShare('rl_navigation_pkg'), 'config', 'nav2_params.yaml',
     ])
 
-    # Define slam_toolbox once so the lifecycle ChangeState events can reference it.
-    slam_toolbox_node = LifecycleNode(
-        package='slam_toolbox',
-        executable='async_slam_toolbox_node',
-        name='slam_toolbox',
-        namespace='',
-        parameters=[slam_toolbox_config, {'use_sim_time': True}],
-        output='screen',
-    )
+    # SAC-6 (2026-05-12): slam_toolbox is intentionally NOT launched. Phase 1
+    # training runs in a fixed arena (worlds/example_world.sdf) with static
+    # obstacles, so dynamic SLAM contributes no signal that Nav2 cannot get
+    # straight from /lidar via its obstacle_layer. Dropping slam_toolbox also
+    # sidesteps the empirical "second lifecycle cycle fails" problem documented
+    # in SAC-5. The required `map → odom` TF is supplied by a static identity
+    # transform below — since map ≡ odom in this configuration, the EKF-based
+    # reward (ADR-004:39-40, on /odom) is geometrically the same as the
+    # slam-corrected pose would have been. The slam_toolbox_config variable is
+    # left defined above for when SAC training graduates back to dynamic SLAM
+    # (e.g. real-robot deployment); it is currently unused.
+    _ = slam_toolbox_config  # silence unused-variable linters
 
-    # ADR-010:62 / SAC-5: slam_toolbox's initial activation is auto-driven on
-    # the configure→inactive transition. The handler must fire ONLY on the
-    # first such transition — otherwise `RLNavigation-v1.reset()`'s manual
-    # `deactivate → cleanup → configure → activate` cycle races with this
-    # handler re-emitting ACTIVATE every time slam lands in `inactive`, and
-    # the env's deactivate gets reported as `success=False`. A closure flag
-    # inside an OpaqueFunction makes the entity one-shot without needing to
-    # un-register the event handler itself.
-    _slam_initial_activate_fired = {'value': False}
-
-    def _slam_initial_activate(context, *args, **kwargs):
-        if _slam_initial_activate_fired['value']:
-            return []
-        _slam_initial_activate_fired['value'] = True
-        return [EmitEvent(event=ChangeState(
-            lifecycle_node_matcher=matches_action(slam_toolbox_node),
-            transition_id=Transition.TRANSITION_ACTIVATE,
-        ))]
-
-    # with open(urdf_file, 'r') as file_handler:
-    #     robot_desc = file_handler.read()
-    
     return LaunchDescription([
         AppendEnvironmentVariable(
             'GZ_SIM_RESOURCE_PATH',
@@ -190,23 +171,20 @@ def generate_launch_description():
             output='screen',
         ),
 
-        # slam_toolbox in online_async mode (ADR-007). Reads /lidar + the EKF's
-        # odom->base_footprint TF as motion prior, publishes /map and map->odom TF.
-        # Asynchronous to the ADR-004 10 Hz cycle (ADR-007:33), so no coordination
-        # with /ekf_input_gate/release.
-        # Must be a LifecycleNode + auto-transition: in ROS 2 Jazzy, async_slam_toolbox_node
-        # is a managed lifecycle node that boots in `unconfigured` and does NOT auto-activate;
-        # without the ChangeState events below it sits idle and never subscribes to /lidar.
-        slam_toolbox_node,
-        EmitEvent(event=ChangeState(
-            lifecycle_node_matcher=matches_action(slam_toolbox_node),
-            transition_id=Transition.TRANSITION_CONFIGURE,
-        )),
-        RegisterEventHandler(OnStateTransition(
-            target_lifecycle_node=slam_toolbox_node,
-            goal_state='inactive',
-            entities=[OpaqueFunction(function=_slam_initial_activate)],
-        )),
+        # SAC-6 (2026-05-12): static map → odom identity TF replaces slam_toolbox.
+        # `map ≡ odom` in this training configuration. Nav2 plans in the `map`
+        # frame, but with no slam correction the map/odom drift is zero by
+        # construction; Nav2 ends up planning against the EKF's view of the
+        # world. The local + global costmaps fill themselves from /lidar via
+        # ObstacleLayer (nav2_params.yaml's global_costmap is rolling-window +
+        # obstacle-only, no StaticLayer), so a /map publisher is not needed.
+        Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name='map_to_odom_static_tf',
+            arguments=['--frame-id', 'map', '--child-frame-id', 'odom'],
+            output='screen',
+        ),
 
         # Nav2 stack (ADR-013): NavfnPlanner + RegulatedPurePursuitController + stock BT.
         # Nodes individually launched (not via nav2_bringup) so we can omit waypoint_follower /

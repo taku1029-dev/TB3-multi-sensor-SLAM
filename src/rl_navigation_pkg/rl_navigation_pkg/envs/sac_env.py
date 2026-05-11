@@ -43,7 +43,7 @@ from math import log, sqrt
 import gymnasium as gym
 import numpy as np
 import rclpy
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from gymnasium import spaces
 from lifecycle_msgs.msg import State, Transition
 from lifecycle_msgs.srv import ChangeState, GetState
@@ -117,6 +117,14 @@ SLAM_LIFECYCLE_RESET_SEQUENCE = (
     Transition.TRANSITION_ACTIVATE,
 )
 
+# robot_localization's ekf_node subscribes to /set_pose for external pose
+# overrides. Without this, the EKF integrates wheel + IMU forever and never
+# notices that Gazebo's set_pose teleported the robot back to spawn — every
+# episode starts with stale EKF pose, Nav2 plans against the wrong robot
+# position, and the costmap places obstacles in the wrong place.
+EKF_SET_POSE_TOPIC = '/set_pose'
+EKF_RESET_COV_DIAG = 1e-9  # near-zero — assert certainty in the spawn pose
+
 
 class _V1Node(Node):
     def __init__(self) -> None:
@@ -164,6 +172,15 @@ class _V1Node(Node):
             GetState, f'{SLAM_LIFECYCLE_NAMESPACE}/get_state'
         )
 
+        # SAC-6d: /set_pose forces robot_localization's ekf_node back to the
+        # spawn pose at episode start so its filtered /odom matches the
+        # Gazebo-teleported robot. Without this the EKF retains drift across
+        # resets, Nav2 plans against the wrong robot position, and the
+        # costmap places obstacles in the wrong place.
+        self.ekf_set_pose_pub = self.create_publisher(
+            PoseWithCovarianceStamped, EKF_SET_POSE_TOPIC, 10
+        )
+
     def _on_scan(self, msg: LaserScan) -> None:
         self.latest_scan = msg
 
@@ -197,6 +214,12 @@ class _V1Node(Node):
         self._send_future.add_done_callback(self._on_goal_response)
 
     def _on_goal_response(self, future) -> None:
+        # Late callbacks from a goal that was cancel-then-resent (see
+        # cancel_active_goal) must not clobber the current goal's state.
+        # cancel_active_goal() sets _send_future=None, so a stale callback
+        # whose `future` is no longer the current _send_future is ignored.
+        if future is not self._send_future:
+            return
         handle = future.result()
         self._send_future = None
         if handle is None or not handle.accepted:
@@ -210,7 +233,14 @@ class _V1Node(Node):
         self._result_future = handle.get_result_async()
         self._result_future.add_done_callback(self._on_goal_result)
 
-    def _on_goal_result(self, _future) -> None:
+    def _on_goal_result(self, future) -> None:
+        # Same identity guard as _on_goal_response: ignore the late result
+        # callback of a cancelled goal so it doesn't trigger a spurious
+        # _goal_done=True on the next episode's goal. Observed 2026-05-12:
+        # without this check, every step of episode 2+ saw the previous
+        # episode's cancel-result fire and resample the goal immediately.
+        if future is not self._result_future:
+            return
         self._goal_done = True
         self._goal_handle = None
         self._result_future = None
@@ -225,6 +255,22 @@ class _V1Node(Node):
         self._goal_handle = None
         self._goal_done = True
         self._current_goal_xy = None
+
+    def reset_ekf_pose(self) -> None:
+        """Force robot_localization's ekf_node back to (0, 0, 0) so its
+        filtered /odom agrees with the Gazebo-teleported robot. Fire-and-forget
+        — the EKF picks this up on its next subscriber callback (well under
+        the 5 s topic-refresh wait that follows in reset())."""
+        msg = PoseWithCovarianceStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'odom'
+        msg.pose.pose.orientation.w = 1.0
+        cov = [0.0] * 36
+        # Diagonal entries for (x, y, z, roll, pitch, yaw)
+        for i in (0, 7, 14, 21, 28, 35):
+            cov[i] = EKF_RESET_COV_DIAG
+        msg.pose.covariance = cov
+        self.ekf_set_pose_pub.publish(msg)
 
 
 def _lidar_quality(scan: LaserScan | None) -> tuple[float, float, float, float]:
@@ -646,15 +692,24 @@ class SACEnv(gym.Env):
         # (1) cancel any in-flight Nav2 goal so /cmd_vel stops fighting the
         #     upcoming Gazebo soft reset
         # (2) Gazebo model_only soft reset → robot back at spawn
-        # (3) slam_toolbox lifecycle reset → fresh pose graph + map (ADR-010:62
-        #     and ADR-010:43-47 require rebuilding the map each episode; without
-        #     this, Nav2 plans against stale map cells and the goal-completion
-        #     callback fires on every step from rejected/instant-success goals)
+        # (3) force the EKF back to (0,0,0) via /set_pose — robot_localization
+        #     doesn't notice Gazebo teleports on its own, so without this the
+        #     EKF integrates from the previous episode's terminal pose and
+        #     Nav2's costmap is placed relative to a phantom robot position
+        #     (SAC-6d 2026-05-12)
         # (4) drop subscriber buffers and wait for fresh sensor messages
         # (5) send the next random goal so step() inherits a moving robot
+        #
+        # SAC-6 (2026-05-12): the slam_toolbox lifecycle reset that used to
+        # sit between (2) and (4) has been removed. slam_toolbox is not
+        # launched during training (see spawn_robot.launch.py); the global
+        # costmap reads /lidar directly via ObstacleLayer, so there is no
+        # map state to clear. The _slam_full_reset / _slam_lifecycle_transition
+        # helpers are retained below for future re-enablement of dynamic SLAM
+        # (e.g. real-robot deployment) but are never called by reset().
         self._node.cancel_active_goal()
         gz_ok = self._gz_reset_world()
-        slam_ok = self._slam_full_reset()
+        self._node.reset_ekf_pose()
         self._drop_buffers()
         topics_ok = self._wait_for_initial_obs(RESET_TOPIC_WAIT_S)
         if not topics_ok:
@@ -665,7 +720,6 @@ class SACEnv(gym.Env):
         goal_xy = self._send_random_goal()
         return self._build_obs(), {
             'gz_reset_ok': gz_ok,
-            'slam_reset_ok': slam_ok,
             'topics_ready': topics_ok,
             'goal_xy': goal_xy,
         }

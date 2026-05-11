@@ -155,14 +155,18 @@ global_costmap:
       robot_radius: 0.105
       resolution: 0.05
       transform_tolerance: 0.3
-      track_unknown_space: true
-      # rolling_window false: costmap inherits dimensions from the /map static layer,
-      # which is what slam_toolbox publishes (ADR-007:21).
-      rolling_window: false
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
-      static_layer:
-        plugin: "nav2_costmap_2d::StaticLayer"
-        map_subscribe_transient_local: true
+      # SAC-6 (2026-05-12): slam_toolbox is not launched during training, so
+      # there is no /map publisher to feed a StaticLayer. The global costmap
+      # is therefore rolling-window centred on the robot, and observes
+      # obstacles directly from /lidar via ObstacleLayer. width/height (12 m)
+      # comfortably cover the 10x10 m arena from any point, so Nav2 can still
+      # plan to any goal. If SLAM is re-enabled, set rolling_window:false,
+      # track_unknown_space:true, and restore the static_layer plugin.
+      rolling_window: true
+      width: 12
+      height: 12
+      track_unknown_space: false
+      plugins: ["obstacle_layer", "inflation_layer"]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
