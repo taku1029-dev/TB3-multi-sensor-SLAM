@@ -834,6 +834,23 @@ class SACEnv(gym.Env):
             else None
         )
 
+        # ADR-015 follow-up: pose + error fields for the offline failure-mode
+        # analysis logger. NaN when /odom or /ground_truth_pose hasn't arrived
+        # yet (very early in episode 0).
+        ekf_x = ekf_y = gt_x = gt_y = error_l2 = float('nan')
+        odom_msg = self._node.latest_odom
+        gt_msg = self._node.latest_gt
+        if odom_msg is not None:
+            ekf_x = odom_msg.pose.pose.position.x
+            ekf_y = odom_msg.pose.pose.position.y
+        if gt_msg is not None:
+            gt_x = gt_msg.pose.position.x
+            gt_y = gt_msg.pose.position.y
+        if odom_msg is not None and gt_msg is not None:
+            dx = ekf_x - gt_x
+            dy = ekf_y - gt_y
+            error_l2 = sqrt(dx * dx + dy * dy)
+
         info = {
             'step': self._step_count,
             'has_scan': self._node.latest_scan is not None,
@@ -844,6 +861,11 @@ class SACEnv(gym.Env):
             'set_param_ok': set_param_ok,
             'sigma_wheel': sigma_wheel,
             'sigma_imu': sigma_imu,
+            'ekf_x': ekf_x,
+            'ekf_y': ekf_y,
+            'gt_x': gt_x,
+            'gt_y': gt_y,
+            'error_l2': error_l2,
             'terminated_reason': terminated_reason,
             'truncated_reason': truncated_reason,
             'goal_xy': self._node._current_goal_xy,

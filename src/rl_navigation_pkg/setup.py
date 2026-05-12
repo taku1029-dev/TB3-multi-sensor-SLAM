@@ -35,6 +35,7 @@ setup(
             'sac_smoke_test = rl_navigation_pkg.nodes.sac_smoke_test:main',
             'sac_trainer = rl_navigation_pkg.agents.sac_trainer:main',
             'sac_inference = rl_navigation_pkg.agents.sac_inference:main',
+            'failure_analysis = rl_navigation_pkg.agents.failure_analysis:main',
         ],
     },
 )
