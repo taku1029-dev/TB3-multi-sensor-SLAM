@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted. Line `:73` ("the fixed start pose") is partially superseded by `adr/016-spawn-robot-facing-goal.md`: spawn position remains fixed at origin, but spawn orientation is now per-episode (yaw = atan2 to goal).
 
 ## Context
 

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Closes the open question raised in `adr/002-ros2-system-architecture.md` ("Nav2 planner / controller / behavior tree / costmap layers").
+Accepted. Closes the open question raised in `adr/002-ros2-system-architecture.md` ("Nav2 planner / controller / behavior tree / costmap layers"). Refined by `adr/016-spawn-robot-facing-goal.md`: the RPP selection assumed the controller could handle any robot orientation at reset; in practice RPP stalls on large in-place turns from rest, so the env now respawns the robot already facing its goal each episode.
 
 ## Context
 
