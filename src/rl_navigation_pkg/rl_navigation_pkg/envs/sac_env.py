@@ -789,9 +789,16 @@ class SACEnv(gym.Env):
 
         odom_before = self._node.latest_odom
         self._spin_for(STEP_PERIOD_S)
-        # ADR-012:51: /odom not advancing during the cycle is an infra failure.
-        # Reference identity works because each rclpy callback delivers a fresh
-        # message object.
+        # Grace window: single-threaded rclpy can starve the /odom callback
+        # when 100 Hz IMU + camera + lidar drain the executor in the same
+        # 100 ms. `ros2 topic hz /odom` confirms steady 10 Hz publishing, so
+        # one extra STEP_PERIOD_S of spin is enough to absorb the scheduling
+        # jitter without masking a real /odom outage (ADR-012:51).
+        if odom_before is not None and self._node.latest_odom is odom_before:
+            grace_deadline = time.monotonic() + STEP_PERIOD_S
+            while (self._node.latest_odom is odom_before
+                   and time.monotonic() < grace_deadline):
+                rclpy.spin_once(self._node, timeout_sec=0.01)
         odom_silent = (
             odom_before is not None
             and self._node.latest_odom is odom_before

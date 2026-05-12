@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted. Line `:51` (the 100 ms `/odom`-silent threshold) is partially superseded by `adr/015-odom-silent-grace-window.md`; the rest of this ADR is unchanged.
 
 ## Context
 
