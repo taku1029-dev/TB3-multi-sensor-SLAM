@@ -3,6 +3,11 @@ install/
 script/
 log/
 
+# Vendored third-party ROS package cloned during Phase 2 setup (ADR-006:25).
+# Reproduce with:
+#   git clone --depth 1 https://github.com/MAPIRlab/rf2o_laser_odometry.git src/rf2o_laser_odometry
+src/rf2o_laser_odometry/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

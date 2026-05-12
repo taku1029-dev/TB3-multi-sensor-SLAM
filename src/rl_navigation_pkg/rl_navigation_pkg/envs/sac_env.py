@@ -7,7 +7,7 @@ episode design per ADR-010.
 A-1 + A-2 + A-3 + A-4 + SAC-4 cut:
   - Subscribes /lidar /imu /camera/rgbd/image /odom /ground_truth_pose
   - 15-dim observation, per-feature normalised to [-1, 1] (ADR-009:35-48)
-  - 2-dim action Box(-1, 1) — Phase 1 (sigma_wheel, sigma_imu)
+  - 3-dim action Box(-1, 1) — Phase 2 (sigma_wheel, sigma_imu, sigma_lidar)
   - step() applies σ = exp(a · 3) via /ekf_input_gate/set_parameters with a
     50 ms ack deadline (ADR-012:17-19); on success triggers
     /ekf_input_gate/release. Single timeouts retry the same action up to
@@ -79,7 +79,7 @@ from sensor_msgs.msg import Image, Imu, LaserScan
 from std_srvs.srv import Trigger
 
 OBS_DIM = 15
-ACTION_DIM = 2  # Phase 1: (sigma_wheel, sigma_imu)
+ACTION_DIM = 3  # Phase 2: (sigma_wheel, sigma_imu, sigma_lidar) per ADR-006:25
 LIDAR_SECTORS = 8
 LIDAR_RANGE_MAX = 8.0
 IMU_GYRO_MAX = 10.0
@@ -774,16 +774,18 @@ class SACEnv(gym.Env):
             'spawn_yaw': spawn_yaw,
         }
 
-    def _apply_action(self, action) -> tuple[bool, float, float]:
+    def _apply_action(self, action) -> tuple[bool, float, float, float]:
         """Push σ to /ekf_input_gate and trigger release.
 
-        Returns (set_param_ok, sigma_wheel, sigma_imu). On ack timeout
-        the release is NOT fired (per ADR-012:23-30 the cycle is skipped).
+        Returns (set_param_ok, sigma_wheel, sigma_imu, sigma_lidar). On ack
+        timeout the release is NOT fired (per ADR-012:23-30 the cycle is
+        skipped).
         """
         a = np.asarray(action, dtype=np.float32).reshape(-1)
         a = np.clip(a, -1.0, 1.0)
         sigma_wheel = float(np.exp(a[0] * ACTION_LOG_SCALE))
         sigma_imu = float(np.exp(a[1] * ACTION_LOG_SCALE))
+        sigma_lidar = float(np.exp(a[2] * ACTION_LOG_SCALE))
 
         req = SetParameters.Request()
         req.parameters = [
@@ -799,6 +801,12 @@ class SACEnv(gym.Env):
                     type=ParameterType.PARAMETER_DOUBLE, double_value=sigma_imu
                 ),
             ),
+            Parameter(
+                name='sigma_lidar',
+                value=ParameterValue(
+                    type=ParameterType.PARAMETER_DOUBLE, double_value=sigma_lidar
+                ),
+            ),
         ]
         future = self._node.set_param_client.call_async(req)
         rclpy.spin_until_future_complete(
@@ -810,20 +818,20 @@ class SACEnv(gym.Env):
                 f'set_parameters ack missed {SET_PARAM_TIMEOUT_S * 1000:.0f}ms '
                 'deadline; cycle skipped'
             )
-            return False, sigma_wheel, sigma_imu
+            return False, sigma_wheel, sigma_imu, sigma_lidar
 
         result = future.result()
         all_ok = result is not None and all(r.successful for r in result.results)
         if not all_ok:
             self._node.get_logger().warn(
                 f'set_parameters returned non-success for σ=({sigma_wheel:.3f},'
-                f'{sigma_imu:.3f}); cycle skipped'
+                f'{sigma_imu:.3f},{sigma_lidar:.3f}); cycle skipped'
             )
-            return False, sigma_wheel, sigma_imu
+            return False, sigma_wheel, sigma_imu, sigma_lidar
 
         # Fire release; we do not await it. The gate's response is diagnostic.
         self._node.release_client.call_async(Trigger.Request())
-        return True, sigma_wheel, sigma_imu
+        return True, sigma_wheel, sigma_imu, sigma_lidar
 
     def step(self, action):
         # ADR-012:23-30: a single set_parameters timeout is invisible to SAC —
@@ -831,9 +839,10 @@ class SACEnv(gym.Env):
         # exhausted case is the ADR-012:50 "wrapper unreachable" infrastructure
         # failure and surfaces as truncated=True.
         set_param_ok = False
-        sigma_wheel = sigma_imu = float('nan')
+        sigma_wheel = sigma_imu = sigma_lidar = float('nan')
         for _ in range(SET_PARAM_MAX_RETRIES):
-            set_param_ok, sigma_wheel, sigma_imu = self._apply_action(action)
+            set_param_ok, sigma_wheel, sigma_imu, sigma_lidar = \
+                self._apply_action(action)
             if set_param_ok:
                 break
 
@@ -911,6 +920,7 @@ class SACEnv(gym.Env):
             'set_param_ok': set_param_ok,
             'sigma_wheel': sigma_wheel,
             'sigma_imu': sigma_imu,
+            'sigma_lidar': sigma_lidar,
             'ekf_x': ekf_x,
             'ekf_y': ekf_y,
             'gt_x': gt_x,

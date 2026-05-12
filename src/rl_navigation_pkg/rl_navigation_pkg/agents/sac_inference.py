@@ -29,7 +29,7 @@ import rl_navigation_pkg.envs  # noqa: F401  registers RLNavigation-v0/v1
 
 
 CSV_COLUMNS = [
-    'step', 'sigma_wheel', 'sigma_imu',
+    'step', 'sigma_wheel', 'sigma_imu', 'sigma_lidar',
     'ekf_x', 'ekf_y', 'gt_x', 'gt_y', 'error_l2',
     'goal_x', 'goal_y', 'reward',
     'nav_status_code', 'nav_status_label',
@@ -91,6 +91,7 @@ def main() -> None:
                             info.get('step', step),
                             info.get('sigma_wheel'),
                             info.get('sigma_imu'),
+                            info.get('sigma_lidar'),
                             info.get('ekf_x'),
                             info.get('ekf_y'),
                             info.get('gt_x'),

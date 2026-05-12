@@ -1,3 +1,4 @@
+import os
 from ast import arguments
 from sys import executable
 from ament_index_python.packages import get_package_share_directory
@@ -25,11 +26,18 @@ def generate_launch_description():
     urdf_file = PathJoinSubstitution([custom_robot_description_path, 'urdf', 'custom_robot.urdf'])
     gz_gui_conf_path = PathJoinSubstitution([custom_robot_description_path, 'gazebo', 'gui.config'])
     sdf_file = PathJoinSubstitution([custom_robot_description_path, 'worlds', 'example_world.sdf'])
+    # GZ_SIM_RESOURCE_PATH needs an absolute, normalised path — previously this
+    # was PathJoinSubstitution([custom_robot_description_path, '..']) which
+    # produces a literal "..", and some gz-sim path resolvers don't normalise
+    # it, leaving `model://custom_robot_description/...` URIs unresolved.
+    custom_robot_description_share_parent = os.path.dirname(
+        get_package_share_directory('custom_robot_description')
+    )
     ros_gz_sim_pkg_path = get_package_share_directory('ros_gz_sim')
     gz_launch_path = PathJoinSubstitution([ros_gz_sim_pkg_path, 'launch', 'gz_sim.launch.py'])
     # Phase 1 EKF + gate share one yaml; ROS 2 dispatches by node name (ADR-006:38, ADR-014).
-    ekf_phase1_config = PathJoinSubstitution([
-        FindPackageShare('rl_navigation_pkg'), 'config', 'ekf_phase1.yaml',
+    ekf_phase_config = PathJoinSubstitution([
+        FindPackageShare('rl_navigation_pkg'), 'config', 'ekf_phase2.yaml',
     ])
     # slam_toolbox is phase-invariant per ADR-007:34.
     slam_toolbox_config = PathJoinSubstitution([
@@ -56,7 +64,7 @@ def generate_launch_description():
     return LaunchDescription([
         AppendEnvironmentVariable(
             'GZ_SIM_RESOURCE_PATH',
-            PathJoinSubstitution([custom_robot_description_path, '..'])
+            custom_robot_description_share_parent,
         ),
         
         # Include and execute another launch file
@@ -113,6 +121,11 @@ def generate_launch_description():
             ],
             remappings=[
                 ('/model/custom_robot/pose', '/ground_truth_pose'),
+                # robot_state_publisher subscribes to /joint_states; gz-sim publishes
+                # the wheel joint state on /model/custom_robot/joint_state. Without
+                # this remap, the wheel rotation never reaches the TF tree and RViz
+                # shows the wheel links frozen at their initial pose.
+                ('/model/custom_robot/joint_state', '/joint_states'),
             ],
             output='screen'
         ),
@@ -132,6 +145,31 @@ def generate_launch_description():
             output='screen',
         ),
 
+        # ADR-006 Phase 2 stream: rf2o_laser_odometry computes a planar /odom-shaped
+        # estimate from successive /lidar scans. EKF treats it as a third input
+        # (alongside wheel + IMU). publish_tf=False because the EKF owns the
+        # odom -> base_footprint TF (ADR-002:52).
+        Node(
+            package='rf2o_laser_odometry',
+            executable='rf2o_laser_odometry_node',
+            name='rf2o_laser_odometry',
+            parameters=[{
+                'laser_scan_topic': '/lidar',
+                'odom_topic': '/odom_lidar',
+                'publish_tf': False,
+                'base_frame_id': 'base_footprint',
+                'odom_frame_id': 'odom',
+                # Empty string disables the "wait for initial pose" path in
+                # rf2o (CLaserOdometry2DNode.cpp:53-69); the node initialises
+                # at origin immediately so LaserCallBack stops dropping scans
+                # on the GT_pose_initialized guard.
+                'init_pose_from_topic': '',
+                'freq': 10.0,
+                'use_sim_time': True,
+            }],
+            output='screen',
+        ),
+
         # EKF input gate (ADR-011, ADR-014): buffers /odom_wheel and /imu latest-wins,
         # applies σ_wheel / σ_imu (set_parameters target), republishes onto
         # /ekf_in/odom_wheel and /ekf_in/imu only on /ekf_input_gate/release service call.
@@ -139,7 +177,7 @@ def generate_launch_description():
             package='rl_navigation_pkg',
             executable='ekf_input_gate',
             name='ekf_input_gate',
-            parameters=[ekf_phase1_config, {'use_sim_time': True}],
+            parameters=[ekf_phase_config, {'use_sim_time': True}],
             output='screen',
         ),
 
@@ -164,7 +202,7 @@ def generate_launch_description():
             package='robot_localization',
             executable='ekf_node',
             name='ekf_filter_node',
-            parameters=[ekf_phase1_config, {'use_sim_time': True}],
+            parameters=[ekf_phase_config, {'use_sim_time': True}],
             remappings=[
                 ('odometry/filtered', '/odom'),
             ],

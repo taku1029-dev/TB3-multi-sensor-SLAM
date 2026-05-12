@@ -57,6 +57,7 @@ def summarize_episode(csv_path: Path) -> dict:
 
     sigma_wheels = _finite([_as_float(r['sigma_wheel']) for r in rows])
     sigma_imus = _finite([_as_float(r['sigma_imu']) for r in rows])
+    sigma_lidars = _finite([_as_float(r.get('sigma_lidar', '')) for r in rows])
     errors = _finite([_as_float(r['error_l2']) for r in rows])
     rewards = [_as_float(r['reward']) for r in rows]
 
@@ -103,6 +104,9 @@ def summarize_episode(csv_path: Path) -> dict:
         'sigma_imu_mean': statistics.mean(sigma_imus) if sigma_imus else float('nan'),
         'sigma_imu_min': min(sigma_imus) if sigma_imus else float('nan'),
         'sigma_imu_max': max(sigma_imus) if sigma_imus else float('nan'),
+        'sigma_lidar_mean': statistics.mean(sigma_lidars) if sigma_lidars else float('nan'),
+        'sigma_lidar_min': min(sigma_lidars) if sigma_lidars else float('nan'),
+        'sigma_lidar_max': max(sigma_lidars) if sigma_lidars else float('nan'),
         'error_max': max(errors) if errors else float('nan'),
         'error_final': errors[-1] if errors else float('nan'),
         'step_1m': step_1m,
@@ -148,7 +152,7 @@ def print_outcome_breakdown(summaries: list[dict]) -> None:
     total = len(summaries)
     header = (
         f'{"outcome":<22} {"count":>10} {"mean steps":>12} '
-        f'{"σ_wheel μ":>12} {"σ_imu μ":>12} {"mean err_max":>14}'
+        f'{"σ_wheel μ":>12} {"σ_imu μ":>12} {"σ_lidar μ":>12} {"mean err_max":>14}'
     )
     print(header)
     print('-' * len(header))
@@ -159,12 +163,14 @@ def print_outcome_breakdown(summaries: list[dict]) -> None:
         mean_steps = statistics.mean(s['final_step'] for s in group)
         sw = _finite([s['sigma_wheel_mean'] for s in group])
         si = _finite([s['sigma_imu_mean'] for s in group])
+        sl = _finite([s['sigma_lidar_mean'] for s in group])
         em = _finite([s['error_max'] for s in group])
         print(
             f'{outcome:<22} {n:>4}/{total:<4} ({share:5.1f}%)  '
             f'{mean_steps:>12.1f} '
             f'{statistics.mean(sw) if sw else float("nan"):>12.2f} '
             f'{statistics.mean(si) if si else float("nan"):>12.2f} '
+            f'{statistics.mean(sl) if sl else float("nan"):>12.2f} '
             f'{statistics.mean(em) if em else float("nan"):>14.2f}'
         )
 

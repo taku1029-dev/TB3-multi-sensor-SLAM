@@ -30,6 +30,7 @@ STEPS_PER_EPISODE = 100
 def _step_log(i: int, action, reward: float, obs, info: dict) -> None:
     sw = info.get('sigma_wheel', float('nan'))
     si = info.get('sigma_imu', float('nan'))
+    sl = info.get('sigma_lidar', float('nan'))
     sp_ok = info.get('set_param_ok', False)
     goal = info.get('goal_xy')
     goal_str = f'goal=({goal[0]:+.2f},{goal[1]:+.2f})' if goal else 'goal=None'
@@ -42,8 +43,8 @@ def _step_log(i: int, action, reward: float, obs, info: dict) -> None:
     )
     print(
         f'step={i:3d}  '
-        f'a=[{action[0]:+.2f}, {action[1]:+.2f}]  '
-        f'σ=({sw:6.3f},{si:6.3f}) ok={sp_ok!s:5}  '
+        f'a=[{action[0]:+.2f},{action[1]:+.2f},{action[2]:+.2f}]  '
+        f'σ=({sw:6.3f},{si:6.3f},{sl:6.3f}) ok={sp_ok!s:5}  '
         f'r={reward:+.3f}  '
         f'{goal_str}  '
         f'A={obs[0:4].round(3)}  '

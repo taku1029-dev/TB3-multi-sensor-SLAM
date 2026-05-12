@@ -1,0 +1,149 @@
+# Phase 2 robot_localization ekf_filter_node config for the SAC-tuned-EKF SLAM project.
+# Per adr/006-ekf-input-source-phasing.md:23, Phase 2 fuses wheel odom + IMU + LiDAR-derived
+# odom (rf2o_laser_odometry's /odom_lidar). Twist-only fusion is used for all three streams
+# so they are compared on equal footing and rf2o's accumulated pose drift never displaces
+# the EKF's own pose state.
+#
+# Topic / frame contract:
+#   /odom_wheel  (DiffDrive)            --\
+#   /imu         (Gazebo IMU)           ---> [ EKF input gate wrapper, ADR-011 ]
+#   /odom_lidar  (rf2o_laser_odometry)  --/
+#                            |
+#                            | wrapper applies σ_wheel / σ_imu / σ_lidar (ADR-009:25-27),
+#                            | republishes after the agent's set_parameters ack
+#                            v
+#   /ekf_in/odom_wheel, /ekf_in/imu, /ekf_in/odom_lidar  -->  ekf_filter_node  -->  /odom + odom->base_footprint TF
+#
+# Phase 2 has its own file (this one) per ADR-006:38-42; Phase 1 (ekf_phase1.yaml) stays
+# untouched so we can revisit it for comparison / rollback.
+
+ekf_filter_node:
+  ros__parameters:
+    frequency: 30.0
+    sensor_timeout: 0.1
+    two_d_mode: true
+    transform_time_offset: 0.0
+    transform_timeout: 0.0
+    print_diagnostics: true
+    debug: false
+
+    publish_tf: true
+    publish_acceleration: false
+
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_footprint
+    world_frame: odom
+
+    # ----- odom0: wheel odometry -----
+    odom0: /ekf_in/odom_wheel
+    # Fuse vx and vyaw. TB3 wheel kinematics: no measured vy.
+    # Field order: x, y, z, roll, pitch, yaw, vx, vy, vz, vroll, vpitch, vyaw, ax, ay, az
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true,  false, false,
+                   false, false, true,
+                   false, false, false]
+    odom0_queue_size: 10
+    odom0_differential: false
+    odom0_relative: false
+    odom0_pose_rejection_threshold: 5.0
+    odom0_twist_rejection_threshold: 1.0
+    odom0_nodelay: false
+
+    # ----- odom1: LiDAR-derived odometry (rf2o_laser_odometry) -----
+    # Twist-only fusion: rf2o emits scan-match-derived (vx, vy, vyaw). We deliberately
+    # do NOT fuse rf2o's pose (x, y, yaw) because (a) scan-matching accumulates its own
+    # drift over an episode, and (b) feeding back rf2o's pose into the EKF could create
+    # a coupled-state loop with slam_toolbox's motion-prior dependency (ADR-007:50,
+    # currently mooted by SAC-6 but kept for the eventual SAC-7 re-enable).
+    odom1: /ekf_in/odom_lidar
+    odom1_config: [false, false, false,
+                   false, false, false,
+                   true,  true,  false,
+                   false, false, true,
+                   false, false, false]
+    odom1_queue_size: 10
+    odom1_differential: false
+    odom1_relative: false
+    odom1_pose_rejection_threshold: 5.0
+    odom1_twist_rejection_threshold: 1.0
+    odom1_nodelay: false
+
+    # ----- imu0: IMU -----
+    imu0: /ekf_in/imu
+    # vyaw only; orientation excluded to match ADR-008's obs vector.
+    imu0_config: [false, false, false,
+                  false, false, false,
+                  false, false, false,
+                  false, false, true,
+                  false, false, false]
+    imu0_queue_size: 10
+    imu0_differential: false
+    imu0_relative: false
+    imu0_pose_rejection_threshold: 0.8
+    imu0_twist_rejection_threshold: 0.8
+    imu0_linear_acceleration_rejection_threshold: 0.8
+    imu0_remove_gravitational_acceleration: true
+    imu0_nodelay: false
+
+    # 15x15 process noise (template defaults; tuning-grade).
+    process_noise_covariance: [0.05, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.05, 0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.06, 0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.03, 0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.03, 0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.06, 0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.025, 0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.025, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.04, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.01, 0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.01, 0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.02, 0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.01, 0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.01, 0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.015]
+
+    initial_estimate_covariance: [1e-9, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  1e-9, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  1e-9, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  1e-9, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  1e-9, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  1e-9, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  1e-9, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  1e-9, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  1e-9, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  1e-9, 0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  1e-9, 0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  1e-9, 0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  1e-9, 0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  1e-9, 0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  1e-9]
+
+
+# EKF input gate wrapper — Phase 2 adds the lidar stream.
+ekf_input_gate:
+  ros__parameters:
+    # Wheel: vx and vyaw fused. Order: [vx, vyaw].
+    nominal_diagonal_wheel: [0.05, 0.05]
+
+    # IMU: vyaw only. Order: [vyaw].
+    nominal_diagonal_imu: [0.02]
+
+    # LiDAR-odom: vx, vy, vyaw fused. Higher base noise than wheel — scan-matching
+    # is noisier than encoder integration, especially on sparse / symmetric surroundings.
+    # Order: [vx, vy, vyaw]. Retunable without an ADR.
+    nominal_diagonal_lidar: [0.1, 0.1, 0.1]
+
+    # σ multipliers — agent updates each cycle via set_parameters (ADR-014).
+    sigma_wheel: 1.0
+    sigma_imu: 1.0
+    sigma_lidar: 1.0
+
+    # Topic plumbing.
+    raw_topic_wheel: /odom_wheel
+    raw_topic_imu: /imu
+    raw_topic_lidar: /odom_lidar
+    private_topic_wheel: /ekf_in/odom_wheel
+    private_topic_imu: /ekf_in/imu
+    private_topic_lidar: /ekf_in/odom_lidar
