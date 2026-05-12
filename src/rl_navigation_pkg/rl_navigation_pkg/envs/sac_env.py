@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import subprocess
 import time
-from math import log, sqrt
+from math import atan2, cos, log, sin, sqrt
 
 import gymnasium as gym
 import numpy as np
@@ -47,7 +47,28 @@ from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from gymnasium import spaces
 from lifecycle_msgs.msg import State, Transition
 from lifecycle_msgs.srv import ChangeState, GetState
+from action_msgs.msg import GoalStatus
 from nav2_msgs.action import NavigateToPose
+
+NAV_STATUS_NAMES = {
+    GoalStatus.STATUS_UNKNOWN: 'unknown',
+    GoalStatus.STATUS_ACCEPTED: 'accepted',
+    GoalStatus.STATUS_EXECUTING: 'executing',
+    GoalStatus.STATUS_CANCELING: 'canceling',
+    GoalStatus.STATUS_SUCCEEDED: 'succeeded',
+    GoalStatus.STATUS_CANCELED: 'canceled',
+    GoalStatus.STATUS_ABORTED: 'aborted',
+}
+# Custom sentinel codes outside GoalStatus's defined range so failure_analysis
+# can distinguish them in CSV output.
+NAV_STATUS_NO_GOAL = -1
+NAV_STATUS_SENT = -2
+NAV_STATUS_REJECTED = -3
+NAV_STATUS_CANCEL_REQUESTED = -4
+NAV_STATUS_NAMES[NAV_STATUS_NO_GOAL] = 'no_goal'
+NAV_STATUS_NAMES[NAV_STATUS_SENT] = 'sent'
+NAV_STATUS_NAMES[NAV_STATUS_REJECTED] = 'rejected'
+NAV_STATUS_NAMES[NAV_STATUS_CANCEL_REQUESTED] = 'cancel_requested'
 from nav_msgs.msg import Odometry
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
 from rcl_interfaces.srv import SetParameters
@@ -156,6 +177,9 @@ class _V1Node(Node):
         # _goal_done=True means step() should resample and call send_goal again.
         self.nav_client = ActionClient(self, NavigateToPose, NAV_ACTION_NAME)
         self._send_future = None
+        # Instrumentation for failure-mode analysis: track the latest goal's
+        # Nav2 status so per-step CSV can flag rejected/aborted/canceled goals.
+        self._last_nav_status_code = NAV_STATUS_NO_GOAL
         self._result_future = None
         self._goal_handle = None
         self._goal_done = True  # no goal in flight at startup
@@ -210,6 +234,7 @@ class _V1Node(Node):
         self._goal_handle = None
         self._result_future = None
         self._current_goal_xy = (float(x), float(y))
+        self._last_nav_status_code = NAV_STATUS_SENT
         self._send_future = self.nav_client.send_goal_async(msg)
         self._send_future.add_done_callback(self._on_goal_response)
 
@@ -226,9 +251,11 @@ class _V1Node(Node):
             self.get_logger().warn(
                 f'NavigateToPose goal {self._current_goal_xy} rejected by Nav2'
             )
+            self._last_nav_status_code = NAV_STATUS_REJECTED
             self._goal_done = True
             self._current_goal_xy = None
             return
+        self._last_nav_status_code = GoalStatus.STATUS_ACCEPTED
         self._goal_handle = handle
         self._result_future = handle.get_result_async()
         self._result_future.add_done_callback(self._on_goal_result)
@@ -241,6 +268,9 @@ class _V1Node(Node):
         # episode's cancel-result fire and resample the goal immediately.
         if future is not self._result_future:
             return
+        wrapped = future.result()
+        if wrapped is not None:
+            self._last_nav_status_code = int(wrapped.status)
         self._goal_done = True
         self._goal_handle = None
         self._result_future = None
@@ -255,16 +285,24 @@ class _V1Node(Node):
         self._goal_handle = None
         self._goal_done = True
         self._current_goal_xy = None
+        self._last_nav_status_code = NAV_STATUS_CANCEL_REQUESTED
 
-    def reset_ekf_pose(self) -> None:
+    def reset_ekf_pose(self, yaw: float = 0.0) -> None:
         """Force robot_localization's ekf_node back to (0, 0, 0) so its
         filtered /odom agrees with the Gazebo-teleported robot. Fire-and-forget
         — the EKF picks this up on its next subscriber callback (well under
-        the 5 s topic-refresh wait that follows in reset())."""
+        the 5 s topic-refresh wait that follows in reset()).
+
+        `yaw` is the desired heading the EKF should believe the robot has
+        post-reset; reset() passes the goal direction so the robot starts
+        facing where Nav2 wants it to drive (RegulatedPurePursuitController
+        struggles to execute paths that begin with a large turn from a
+        stationary start)."""
         msg = PoseWithCovarianceStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'odom'
-        msg.pose.pose.orientation.w = 1.0
+        msg.pose.pose.orientation.z = sin(yaw / 2.0)
+        msg.pose.pose.orientation.w = cos(yaw / 2.0)
         cov = [0.0] * 36
         # Diagonal entries for (x, y, z, roll, pitch, yaw)
         for i in (0, 7, 14, 21, 28, 35):
@@ -461,7 +499,7 @@ class SACEnv(gym.Env):
                 return True
         return False
 
-    def _gz_reset_world(self) -> bool:
+    def _gz_reset_world(self, yaw: float = 0.0) -> bool:
         """Two-step soft reset (interim subprocess path):
 
         (1) `/world/<name>/control` with `reset: {model_only: true}` — zeroes
@@ -499,10 +537,12 @@ class SACEnv(gym.Env):
                     f'stdout={ctrl.stdout!r} stderr={ctrl.stderr!r}'
                 )
 
+            qz = sin(yaw / 2.0)
+            qw = cos(yaw / 2.0)
             pose_req = (
                 f'name: "{GZ_ROBOT_NAME}", '
                 'position: {x: 0.0, y: 0.0, z: 0.0}, '
-                'orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}'
+                f'orientation: {{x: 0.0, y: 0.0, z: {qz}, w: {qw}}}'
             )
             pose = subprocess.run(
                 ['gz', 'service',
@@ -707,9 +747,18 @@ class SACEnv(gym.Env):
         # map state to clear. The _slam_full_reset / _slam_lifecycle_transition
         # helpers are retained below for future re-enablement of dynamic SLAM
         # (e.g. real-robot deployment) but are never called by reset().
+        # Sample the goal BEFORE the gz teleport so we can spawn the robot
+        # already facing it. RegulatedPurePursuitController (ADR-013) cannot
+        # execute a path that starts with a ~180° in-place turn from rest;
+        # without this, goals with x < 0 used to leave the robot stranded for
+        # the full 60 s episode (controller_server "Failed to make progress"
+        # → spin recovery fails → wait → retry forever; observed 2026-05-12).
+        goal_xy = self._sample_random_goal()
+        spawn_yaw = atan2(goal_xy[1], goal_xy[0])
+
         self._node.cancel_active_goal()
-        gz_ok = self._gz_reset_world()
-        self._node.reset_ekf_pose()
+        gz_ok = self._gz_reset_world(yaw=spawn_yaw)
+        self._node.reset_ekf_pose(yaw=spawn_yaw)
         self._drop_buffers()
         topics_ok = self._wait_for_initial_obs(RESET_TOPIC_WAIT_S)
         if not topics_ok:
@@ -717,11 +766,12 @@ class SACEnv(gym.Env):
                 f'reset: not all topics refreshed within {RESET_TOPIC_WAIT_S}s; '
                 'returning partial obs (zeros for missing channels)'
             )
-        goal_xy = self._send_random_goal()
+        self._node.send_goal(*goal_xy)
         return self._build_obs(), {
             'gz_reset_ok': gz_ok,
             'topics_ready': topics_ok,
             'goal_xy': goal_xy,
+            'spawn_yaw': spawn_yaw,
         }
 
     def _apply_action(self, action) -> tuple[bool, float, float]:
@@ -870,6 +920,11 @@ class SACEnv(gym.Env):
             'truncated_reason': truncated_reason,
             'goal_xy': self._node._current_goal_xy,
             'goal_resampled': new_goal_xy is not None,
+            'nav_status_code': self._node._last_nav_status_code,
+            'nav_status_label': NAV_STATUS_NAMES.get(
+                self._node._last_nav_status_code,
+                str(self._node._last_nav_status_code),
+            ),
         }
         return obs, reward, terminated, truncated, info
 

@@ -32,6 +32,7 @@ CSV_COLUMNS = [
     'step', 'sigma_wheel', 'sigma_imu',
     'ekf_x', 'ekf_y', 'gt_x', 'gt_y', 'error_l2',
     'goal_x', 'goal_y', 'reward',
+    'nav_status_code', 'nav_status_label',
     'terminated_reason', 'truncated_reason',
 ]
 
@@ -97,6 +98,8 @@ def main() -> None:
                             info.get('error_l2'),
                             goal[0], goal[1],
                             reward,
+                            info.get('nav_status_code'),
+                            info.get('nav_status_label'),
                             info.get('terminated_reason'),
                             info.get('truncated_reason'),
                         ])

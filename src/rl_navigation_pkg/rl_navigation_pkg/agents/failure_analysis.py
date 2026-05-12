@@ -73,6 +73,21 @@ def summarize_episode(csv_path: Path) -> dict:
         None,
     )
 
+    nav_labels = [r.get('nav_status_label', '') for r in rows]
+    # Collapse repeats: keep ordered list of distinct labels actually seen
+    # during the episode. Useful for spotting rejected/aborted/canceled.
+    seen: list[str] = []
+    for lbl in nav_labels:
+        if lbl and (not seen or seen[-1] != lbl):
+            seen.append(lbl)
+    nav_trace = ' → '.join(seen) if seen else ''
+    # Dominant label = the one held for the most steps (excludes 'sent' bursts).
+    counts: dict[str, int] = {}
+    for lbl in nav_labels:
+        if lbl:
+            counts[lbl] = counts.get(lbl, 0) + 1
+    dominant = max(counts.items(), key=lambda kv: kv[1])[0] if counts else ''
+
     return {
         'path': csv_path,
         'final_step': int(last['step']),
@@ -92,6 +107,8 @@ def summarize_episode(csv_path: Path) -> dict:
         'error_final': errors[-1] if errors else float('nan'),
         'step_1m': step_1m,
         'step_2m': step_2m,
+        'nav_dominant': dominant,
+        'nav_trace': nav_trace,
     }
 
 
@@ -105,30 +122,20 @@ def print_per_episode(summaries: list[dict]) -> None:
     print(f'\nper-episode summary ({len(summaries)} episodes)\n')
     header = (
         f'{"episode":<28} {"steps":>5} {"outcome":<22} {"reward":>9} '
-        f'{"start_xy":<16} {"goal_xy":<16} '
-        f'{"σ_wheel μ[min,max]":<22} {"σ_imu μ[min,max]":<22} '
-        f'{"err_max":>7} {"@1m":>5} {"@2m":>5}'
+        f'{"goal_xy":<16} {"err_max":>7} {"@1m":>5} {"@2m":>5} '
+        f'{"nav_dom":<12} {"nav_trace"}'
     )
     print(header)
     print('-' * len(header))
     for s in summaries:
-        sxy = f'({_fmt(s["start_x"], 5, 2)},{_fmt(s["start_y"], 5, 2)})'
         gxy = f'({_fmt(s["goal_x"], 5, 2)},{_fmt(s["goal_y"], 5, 2)})'
-        sw = (
-            f'{_fmt(s["sigma_wheel_mean"], 5, 2)}'
-            f'[{_fmt(s["sigma_wheel_min"], 5, 2)},{_fmt(s["sigma_wheel_max"], 5, 2)}]'
-        )
-        si = (
-            f'{_fmt(s["sigma_imu_mean"], 5, 2)}'
-            f'[{_fmt(s["sigma_imu_min"], 5, 2)},{_fmt(s["sigma_imu_max"], 5, 2)}]'
-        )
         ep1m = '-' if s['step_1m'] is None else f'{s["step_1m"]:>5}'
         ep2m = '-' if s['step_2m'] is None else f'{s["step_2m"]:>5}'
         print(
             f'{s["path"].stem:<28} {s["final_step"]:>5} {s["outcome"]:<22} '
-            f'{s["total_reward"]:>+9.1f} {sxy:<16} {gxy:<16} '
-            f'{sw:<22} {si:<22} '
-            f'{_fmt(s["error_max"], 7, 2)} {ep1m} {ep2m}'
+            f'{s["total_reward"]:>+9.1f} {gxy:<16} '
+            f'{_fmt(s["error_max"], 7, 2)} {ep1m} {ep2m} '
+            f'{s["nav_dominant"]:<12} {s["nav_trace"]}'
         )
 
 
